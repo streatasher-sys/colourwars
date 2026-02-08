@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chain Reaction — 4 Player</title>
+  <style>
+    body { display: flex; flex-direction: column; align-items: center; margin-top: 30px; font-family: sans-serif; }
+    canvas { border: 2px solid black; display: block; }
+    #turnIndicator { margin-bottom: 10px; font-size: 18px; font-weight: bold; min-height: 1.5em; }
+    #options { margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+    #options label { cursor: pointer; user-select: none; }
+  </style>
+</head>
+<body>
+<div id="turnIndicator">Red's turn</div>
+<div id="options"><label><input type="checkbox" id="animateCheckbox" checked> Animate explosions</label></div>
+<canvas id="boardCanvas" width="350" height="350"></canvas>
+
+<script>
+const rows = 7;
+const cols = 7;
+const cellSize = 50;
+
+const red = 1;
+const green = 2;
+const blue = 3;
+const yellow = 4;
+const PLAYERS = [red, green, blue, yellow];
+const PLAYER_NAMES = { [red]: "Red", [green]: "Green", [blue]: "Blue", [yellow]: "Yellow" };
+const PLAYER_COLORS = { [red]: "#c22", [green]: "#282", [blue]: "#26a", [yellow]: "#da4" };
+
+// Board: four corners, one step in — Red (1,1), Green (1,5), Blue (5,1), Yellow (5,5)
+let board = Array(rows).fill().map(() =>
+  Array(cols).fill().map(() => ({ count: 0, owner: 0 }))
+);
+board[1][1] = { count: 1, owner: red };
+board[1][5] = { count: 1, owner: green };
+board[5][1] = { count: 1, owner: blue };
+board[5][5] = { count: 1, owner: yellow };
+
+let currentPlayerIndex = 0;
+let gameEnded = false;
+let isAnimating = false;
+const EXPLOSION_DELAY_MS = 380;
+
+const canvas = document.getElementById("boardCanvas");
+const ctx = canvas.getContext("2d");
+
+// --- Helpers ---
+function criticalMass() { return 4; }
+
+function neighbors(rows, cols, row, col) {
+  const result = [];
+  if (row > 0) result.push([row - 1, col]);
+  if (row < rows - 1) result.push([row + 1, col]);
+  if (col > 0) result.push([row, col - 1]);
+  if (col < cols - 1) result.push([row, col + 1]);
+  return result;
+}
+
+// --- Game logic ---
+function makeMove(board, row, col, player) {
+  if (row < 0 || row >= rows || col < 0 || col >= cols) return false;
+  if (board[row][col].owner !== player) return false;
+  board[row][col].count += 1;
+  board[row][col].owner = player;
+  return true;
+}
+
+function isUnstable(board, row, col) {
+  return board[row][col].count >= criticalMass();
+}
+
+function explode(board, row, col, player) {
+  const count = board[row][col].count;
+  const orbsPerNeighbor = count - 3;
+  board[row][col].count = 0;
+  board[row][col].owner = 0;
+  for (const [r, c] of neighbors(rows, cols, row, col)) {
+    board[r][c].count += orbsPerNeighbor;
+    board[r][c].owner = player;
+  }
+}
+
+function resolve(board, player) {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (isUnstable(board, r, c)) {
+          explode(board, r, c, player);
+          changed = true;
+        }
+      }
+    }
+  }
+}
+
+function resolveOneStep(board, player) {
+  let changed = false;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (isUnstable(board, r, c)) {
+        explode(board, r, c, player);
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function resolveAnimated(board, player, onDone) {
+  if (!resolveOneStep(board, player)) {
+    onDone();
+    return;
+  }
+  drawBoard();
+  setTimeout(() => resolveAnimated(board, player, onDone), EXPLOSION_DELAY_MS);
+}
+
+function countOrbsByPlayer(board) {
+  const counts = { [red]: 0, [green]: 0, [blue]: 0, [yellow]: 0 };
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const owner = board[r][c].owner;
+      if (owner !== 0) counts[owner] += board[r][c].count;
+    }
+  }
+  return counts;
+}
+
+function gameOver(board) {
+  const counts = countOrbsByPlayer(board);
+  const survivors = PLAYERS.filter(p => counts[p] > 0);
+  if (survivors.length === 1) return survivors[0];
+  return 0;
+}
+
+function nextPlayerIndex() {
+  const counts = countOrbsByPlayer(board);
+  for (let i = 1; i <= 4; i++) {
+    const idx = (currentPlayerIndex + i) % 4;
+    if (counts[PLAYERS[idx]] > 0) return idx;
+  }
+  return (currentPlayerIndex + 1) % 4;
+}
+
+// --- Drawing ---
+function drawBoard() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      ctx.strokeStyle = "black";
+      ctx.strokeRect(c * cellSize, r * cellSize, cellSize, cellSize);
+      const cell = board[r][c];
+      if (cell.count > 0) {
+        ctx.fillStyle = PLAYER_COLORS[cell.owner] || "gray";
+        const radius = 10 + 5 * (cell.count - 1);
+        ctx.beginPath();
+        ctx.arc(c * cellSize + cellSize / 2, r * cellSize + cellSize / 2, radius, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.fillStyle = cell.owner === yellow ? "#333" : "white";
+        ctx.font = "bold 16px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(cell.count, c * cellSize + cellSize / 2, r * cellSize + cellSize / 2);
+      }
+      if (isUnstable(board, r, c)) {
+        ctx.strokeStyle = "orange";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(c * cellSize + 1, r * cellSize + 1, cellSize - 2, cellSize - 2);
+        ctx.lineWidth = 1;
+      }
+    }
+  }
+}
+
+const turnEl = document.getElementById("turnIndicator");
+
+function updateTurnIndicator() {
+  if (gameEnded) return;
+  const current = PLAYERS[currentPlayerIndex];
+  turnEl.textContent = PLAYER_NAMES[current] + "'s turn";
+  turnEl.style.color = PLAYER_COLORS[current];
+}
+
+function finishMove() {
+  isAnimating = false;
+  const winner = gameOver(board);
+  if (winner !== 0) {
+    gameEnded = true;
+    turnEl.style.color = "";
+    turnEl.textContent = PLAYER_NAMES[winner] + " wins!";
+    setTimeout(() => alert(PLAYER_NAMES[winner] + " wins!"), 10);
+    return;
+  }
+  currentPlayerIndex = nextPlayerIndex();
+  updateTurnIndicator();
+}
+
+canvas.addEventListener("click", (e) => {
+  if (gameEnded || isAnimating) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+  const row = Math.floor(y / cellSize);
+  const col = Math.floor(x / cellSize);
+
+  const currentPlayer = PLAYERS[currentPlayerIndex];
+  if (!makeMove(board, row, col, currentPlayer)) return;
+
+  const useAnimation = document.getElementById("animateCheckbox").checked;
+  if (useAnimation) {
+    isAnimating = true;
+    drawBoard();
+    resolveAnimated(board, currentPlayer, () => {
+      drawBoard();
+      finishMove();
+    });
+  } else {
+    resolve(board, currentPlayer);
+    drawBoard();
+    finishMove();
+  }
+});
+
+drawBoard();
+updateTurnIndicator();
+</script>
+</body>
+</html>

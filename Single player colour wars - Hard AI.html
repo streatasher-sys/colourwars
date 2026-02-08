@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chain Reaction — Single Player vs Hard AI</title>
+  <style>
+    body { display: flex; flex-direction: column; align-items: center; margin-top: 30px; font-family: sans-serif; }
+    canvas { border: 2px solid black; display: block; }
+    #turnIndicator { margin-bottom: 10px; font-size: 18px; font-weight: bold; min-height: 1.5em; }
+    #options { margin-bottom: 10px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    #options label { cursor: pointer; user-select: none; }
+    #aiStatus { margin-top: 8px; font-size: 14px; color: #666; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+<div id="turnIndicator">Your turn</div>
+<div id="options"><label><input type="checkbox" id="animateCheckbox" checked> Animate explosions</label></div>
+<canvas id="boardCanvas" width="350" height="350"></canvas>
+<div id="aiStatus"></div>
+
+<script>
+const rows = 7;
+const cols = 7;
+const cellSize = 50;
+const red = 1;   // player
+const green = -1; // AI
+
+const WIN_SCORE = 1e8;
+const LOSS_SCORE = -1e8;
+const AI_TIME_LIMIT_MS = 5000; // maximum 5 seconds, then play best move found
+
+let board = Array(rows).fill().map(() =>
+  Array(cols).fill().map(() => ({ count: 0, owner: 0 }))
+);
+board[1][1] = { count: 1, owner: red };
+board[5][5] = { count: 1, owner: green };
+
+let currentPlayer = red;
+let gameEnded = false;
+let redHasPlayed = true;
+let greenHasPlayed = true;
+let isAnimating = false;
+const EXPLOSION_DELAY_MS = 380;
+
+const canvas = document.getElementById("boardCanvas");
+const ctx = canvas.getContext("2d");
+const aiStatusEl = document.getElementById("aiStatus");
+
+// --- Helpers ---
+function criticalMass() { return 4; }
+
+function neighbors(rows, cols, row, col) {
+  const result = [];
+  if (row > 0) result.push([row - 1, col]);
+  if (row < rows - 1) result.push([row + 1, col]);
+  if (col > 0) result.push([row, col - 1]);
+  if (col < cols - 1) result.push([row, col + 1]);
+  return result;
+}
+
+function copyBoard(board) {
+  return board.map(row => row.map(cell => ({ count: cell.count, owner: cell.owner })));
+}
+
+// --- Game logic ---
+function makeMove(board, row, col, player) {
+  if (row < 0 || row >= rows || col < 0 || col >= cols) return false;
+  if (board[row][col].owner !== player) return false;
+  board[row][col].count += 1;
+  board[row][col].owner = player;
+  return true;
+}
+
+function isUnstable(board, row, col) {
+  return board[row][col].count >= criticalMass();
+}
+
+function explode(board, row, col, player) {
+  const count = board[row][col].count;
+  const orbsPerNeighbor = count - 3;
+  board[row][col].count = 0;
+  board[row][col].owner = 0;
+  for (const [r, c] of neighbors(rows, cols, row, col)) {
+    board[r][c].count += orbsPerNeighbor;
+    board[r][c].owner = player;
+  }
+}
+
+function resolve(board, player) {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (isUnstable(board, r, c)) {
+          explode(board, r, c, player);
+          changed = true;
+        }
+      }
+    }
+  }
+}
+
+function resolveOneStep(board, player) {
+  let changed = false;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (isUnstable(board, r, c)) {
+        explode(board, r, c, player);
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function resolveAnimated(board, player, onDone) {
+  if (!resolveOneStep(board, player)) {
+    onDone();
+    return;
+  }
+  drawBoard();
+  setTimeout(() => resolveAnimated(board, player, onDone), EXPLOSION_DELAY_MS);
+}
+
+function getValidMoves(board, player) {
+  const moves = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (board[r][c].owner === player) moves.push([r, c]);
+    }
+  }
+  return moves;
+}
+
+// Apply a move on a copy of the board; returns new board (does not mutate original).
+function applyMove(board, row, col, player) {
+  const next = copyBoard(board);
+  makeMove(next, row, col, player);
+  resolve(next, player);
+  return next;
+}
+
+// Terminal check for search (no "hasPlayed" — we're deep in the tree).
+function gameOverForSearch(board) {
+  let redOrbs = 0, greenOrbs = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (board[r][c].owner === red) redOrbs += board[r][c].count;
+      if (board[r][c].owner === green) greenOrbs += board[r][c].count;
+    }
+  }
+  if (redOrbs > 0 && greenOrbs === 0) return green; // AI wins
+  if (greenOrbs > 0 && redOrbs === 0) return red;  // player wins
+  return 0;
+}
+
+// Evaluation from AI's perspective: positive = good for AI (green).
+function evaluate(board) {
+  let redOrbs = 0, greenOrbs = 0;
+  let redCells = 0, greenCells = 0;
+  let greenNearCritical = 0, redNearCritical = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cell = board[r][c];
+      if (cell.owner === red) {
+        redOrbs += cell.count;
+        redCells += 1;
+        if (cell.count >= 3) redNearCritical += cell.count;
+      } else if (cell.owner === green) {
+        greenOrbs += cell.count;
+        greenCells += 1;
+        if (cell.count >= 3) greenNearCritical += cell.count;
+      }
+    }
+  }
+  const material = (greenOrbs - redOrbs) * 10;
+  const mobility = (greenCells - redCells) * 3;
+  const threat = (greenNearCritical - redNearCritical) * 2;
+  return material + mobility + threat;
+}
+
+let searchStartTime = 0;
+let searchAbort = false;
+
+function minimax(board, depth, alpha, beta, isAITurn) {
+  if (searchAbort) return 0;
+  if (Date.now() - searchStartTime > AI_TIME_LIMIT_MS) {
+    searchAbort = true;
+    return evaluate(board);
+  }
+
+  const winner = gameOverForSearch(board);
+  if (winner === green) return WIN_SCORE - (100 - depth); // prefer faster wins
+  if (winner === red) return LOSS_SCORE + (100 - depth);  // prefer slower losses
+  if (depth <= 0) return evaluate(board);
+
+  if (isAITurn) {
+    const moves = getValidMoves(board, green);
+    if (moves.length === 0) return evaluate(board);
+    let maxEval = LOSS_SCORE - 1;
+    for (const [r, c] of moves) {
+      const child = applyMove(board, r, c, green);
+      const eval = minimax(child, depth - 1, alpha, beta, false);
+      maxEval = Math.max(maxEval, eval);
+      alpha = Math.max(alpha, eval);
+      if (beta <= alpha) break;
+    }
+    return maxEval;
+  } else {
+    const moves = getValidMoves(board, red);
+    if (moves.length === 0) return evaluate(board);
+    let minEval = WIN_SCORE + 1;
+    for (const [r, c] of moves) {
+      const child = applyMove(board, r, c, red);
+      const eval = minimax(child, depth - 1, alpha, beta, true);
+      minEval = Math.min(minEval, eval);
+      beta = Math.min(beta, eval);
+      if (beta <= alpha) break;
+    }
+    return minEval;
+  }
+}
+
+// Iterative deepening: search depth 1, 2, 3, ... until time runs out. Returns { move, depth }.
+function getBestMove() {
+  let moves = getValidMoves(board, green);
+  if (moves.length === 0) return null;
+  if (moves.length === 1) return { move: moves[0], depth: 0 };
+
+  // Move ordering: try moves that look good first (better alpha-beta pruning).
+  moves = moves.slice().sort((a, b) => {
+    const scoreA = evaluate(applyMove(board, a[0], a[1], green));
+    const scoreB = evaluate(applyMove(board, b[0], b[1], green));
+    return scoreB - scoreA;
+  });
+
+  searchStartTime = Date.now();
+  searchAbort = false;
+  let bestMove = moves[0];
+  let bestScore = LOSS_SCORE - 1;
+  let completedDepth = 0;
+
+  for (let depth = 1; depth <= 12 && !searchAbort; depth++) {
+    let alpha = LOSS_SCORE - 1;
+    let depthBestMove = null;
+    let depthBestScore = LOSS_SCORE - 1;
+
+    for (const [r, c] of moves) {
+      if (searchAbort) break;
+      const child = applyMove(board, r, c, green);
+      const eval = minimax(child, depth - 1, alpha, WIN_SCORE + 1, false);
+      if (eval > depthBestScore) {
+        depthBestScore = eval;
+        depthBestMove = [r, c];
+      }
+      alpha = Math.max(alpha, eval);
+    }
+
+    if (searchAbort) break;
+    if (depthBestMove !== null) {
+      bestMove = depthBestMove;
+      bestScore = depthBestScore;
+      completedDepth = depth;
+    }
+  }
+
+  return { move: bestMove, depth: completedDepth };
+}
+
+function gameOver(board) {
+  let redOrbs = 0, greenOrbs = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (board[r][c].owner === red) redOrbs += board[r][c].count;
+      if (board[r][c].owner === green) greenOrbs += board[r][c].count;
+    }
+  }
+  if (redOrbs > 0 && greenOrbs === 0 && greenHasPlayed) return red;
+  if (greenOrbs > 0 && redOrbs === 0 && redHasPlayed) return green;
+  return 0;
+}
+
+// --- Drawing ---
+function drawBoard() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      ctx.strokeStyle = "black";
+      ctx.strokeRect(c * cellSize, r * cellSize, cellSize, cellSize);
+      const cell = board[r][c];
+      if (cell.count > 0) {
+        ctx.fillStyle = cell.owner === red ? "red" : "green";
+        const radius = 10 + 5 * (cell.count - 1);
+        ctx.beginPath();
+        ctx.arc(c * cellSize + cellSize / 2, r * cellSize + cellSize / 2, radius, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.fillStyle = "white";
+        ctx.font = "bold 16px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(cell.count, c * cellSize + cellSize / 2, r * cellSize + cellSize / 2);
+      }
+      if (isUnstable(board, r, c)) {
+        ctx.strokeStyle = "yellow";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(c * cellSize + 1, r * cellSize + 1, cellSize - 2, cellSize - 2);
+        ctx.lineWidth = 1;
+      }
+    }
+  }
+}
+
+const turnEl = document.getElementById("turnIndicator");
+
+function updateTurnIndicator() {
+  if (gameEnded) return;
+  turnEl.textContent = currentPlayer === red ? "Your turn" : "AI's turn";
+  aiStatusEl.textContent = "";
+}
+
+function finishMove() {
+  isAnimating = false;
+  const winner = gameOver(board);
+  if (winner !== 0) {
+    gameEnded = true;
+    const msg = winner === red ? "You win!" : "AI wins!";
+    turnEl.textContent = msg;
+    aiStatusEl.textContent = "";
+    setTimeout(() => alert(msg), 10);
+    return;
+  }
+  currentPlayer = -currentPlayer;
+  updateTurnIndicator();
+  if (currentPlayer === green) {
+    aiStatusEl.textContent = "AI thinking…";
+    drawBoard();
+    setTimeout(() => aiTurn(), 50);
+  }
+}
+
+function aiTurn() {
+  const result = getBestMove();
+  const elapsed = ((Date.now() - searchStartTime) / 1000).toFixed(1);
+  if (result === null) {
+    aiStatusEl.textContent = "AI has no moves.";
+    currentPlayer = red;
+    updateTurnIndicator();
+    return;
+  }
+  const [row, col] = result.move;
+  aiStatusEl.textContent = "Searched " + result.depth + " move(s) ahead in " + elapsed + "s.";
+  makeMove(board, row, col, green);
+  const useAnimation = document.getElementById("animateCheckbox").checked;
+  if (useAnimation) {
+    isAnimating = true;
+    drawBoard();
+    resolveAnimated(board, green, () => {
+      drawBoard();
+      finishMove();
+    });
+  } else {
+    resolve(board, green);
+    drawBoard();
+    finishMove();
+  }
+}
+
+canvas.addEventListener("click", (e) => {
+  if (gameEnded || isAnimating || currentPlayer !== red) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+  const row = Math.floor(y / cellSize);
+  const col = Math.floor(x / cellSize);
+
+  if (!makeMove(board, row, col, red)) return;
+
+  const useAnimation = document.getElementById("animateCheckbox").checked;
+  if (useAnimation) {
+    isAnimating = true;
+    drawBoard();
+    resolveAnimated(board, red, () => {
+      drawBoard();
+      finishMove();
+    });
+  } else {
+    resolve(board, red);
+    drawBoard();
+    finishMove();
+  }
+});
+
+drawBoard();
+updateTurnIndicator();
+</script>
+</body>
+</html>

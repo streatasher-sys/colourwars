@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chain Reaction — Single Player vs AI</title>
+  <style>
+    body { display: flex; flex-direction: column; align-items: center; margin-top: 30px; font-family: sans-serif; }
+    canvas { border: 2px solid black; display: block; }
+    #turnIndicator { margin-bottom: 10px; font-size: 18px; font-weight: bold; min-height: 1.5em; }
+    #options { margin-bottom: 10px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    #options label { cursor: pointer; user-select: none; }
+  </style>
+</head>
+<body>
+<div id="turnIndicator">Your turn</div>
+<div id="options"><label><input type="checkbox" id="animateCheckbox" checked> Animate explosions</label></div>
+<canvas id="boardCanvas" width="350" height="350"></canvas>
+
+<script>
+const rows = 7;
+const cols = 7;
+const cellSize = 50;
+const red = 1;   // player
+const green = -1; // AI
+
+// Board with starting positions: player at (1,1), AI at (5,5) — one step in from opposite corners
+let board = Array(rows).fill().map(() =>
+    Array(cols).fill().map(() => ({ count: 0, owner: 0 }))
+);
+board[1][1] = { count: 1, owner: red };
+board[5][5] = { count: 1, owner: green };
+
+let currentPlayer = red;
+let gameEnded = false;
+let redHasPlayed = true;  // player starts with an orb
+let greenHasPlayed = true; // AI starts with an orb
+let isAnimating = false;
+const EXPLOSION_DELAY_MS = 380;
+
+const canvas = document.getElementById("boardCanvas");
+const ctx = canvas.getContext("2d");
+
+// --- Helpers ---
+function criticalMass() { return 4; }
+
+function neighbors(rows, cols, row, col) {
+  const result = [];
+  if (row > 0) result.push([row - 1, col]);
+  if (row < rows - 1) result.push([row + 1, col]);
+  if (col > 0) result.push([row, col - 1]);
+  if (col < cols - 1) result.push([row, col + 1]);
+  return result;
+}
+
+// --- Game logic ---
+function makeMove(board, row, col, player) {
+  if (row < 0 || row >= rows || col < 0 || col >= cols) return false;
+  if (board[row][col].owner !== player) return false; // only play on cells you control
+  board[row][col].count += 1;
+  board[row][col].owner = player;
+  return true;
+}
+
+function isUnstable(board, row, col) {
+  return board[row][col].count >= criticalMass();
+}
+
+function explode(board, row, col, player) {
+  const count = board[row][col].count;
+  const orbsPerNeighbor = count - 3;
+  board[row][col].count = 0;
+  board[row][col].owner = 0;
+  for (const [r, c] of neighbors(rows, cols, row, col)) {
+    board[r][c].count += orbsPerNeighbor;
+    board[r][c].owner = player;
+  }
+}
+
+function resolve(board, player) {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (isUnstable(board, r, c)) {
+          explode(board, r, c, player);
+          changed = true;
+        }
+      }
+    }
+  }
+}
+
+function resolveOneStep(board, player) {
+  let changed = false;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (isUnstable(board, r, c)) {
+        explode(board, r, c, player);
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function resolveAnimated(board, player, onDone) {
+  if (!resolveOneStep(board, player)) {
+    onDone();
+    return;
+  }
+  drawBoard();
+  setTimeout(() => resolveAnimated(board, player, onDone), EXPLOSION_DELAY_MS);
+}
+
+function gameOver(board) {
+  let redOrbs = 0, greenOrbs = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (board[r][c].owner === red) redOrbs += board[r][c].count;
+      if (board[r][c].owner === green) greenOrbs += board[r][c].count;
+    }
+  }
+  if (redOrbs > 0 && greenOrbs === 0 && greenHasPlayed) return red;
+  if (greenOrbs > 0 && redOrbs === 0 && redHasPlayed) return green;
+  return 0;
+}
+
+// --- AI: get all valid moves for green, score them, return best ---
+function getValidMoves(board, player) {
+  const moves = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (board[r][c].owner === player) moves.push([r, c]);
+    }
+  }
+  return moves;
+}
+
+function scoreAIMove(board, row, col) {
+  const cell = board[row][col];
+  let score = 0;
+  // Prefer our cells that are one away from exploding (will chain)
+  if (cell.owner === green) {
+    score += cell.count * 4;
+    if (cell.count === 3) score += 8; // about to explode
+  }
+  // Prefer capturing opponent cells (empty or adjacent to red)
+  const adj = neighbors(rows, cols, row, col);
+  for (const [r, c] of adj) {
+    if (board[r][c].owner === red) score += 6; // next to enemy — good capture
+    if (board[r][c].owner === green && board[r][c].count >= 2) score += 2; // expand our territory
+  }
+  // Slight preference for center to stay mobile
+  const center = (rows - 1) / 2;
+  score -= Math.abs(row - center) + Math.abs(col - center);
+  return score;
+}
+
+function getAIMove() {
+  const moves = getValidMoves(board, green);
+  if (moves.length === 0) return null;
+  let bestScore = -Infinity;
+  const bestMoves = [];
+  for (const [r, c] of moves) {
+    const score = scoreAIMove(board, r, c);
+    if (score > bestScore) {
+      bestScore = score;
+      bestMoves.length = 0;
+      bestMoves.push([r, c]);
+    } else if (score === bestScore) {
+      bestMoves.push([r, c]);
+    }
+  }
+  return bestMoves[Math.floor(Math.random() * bestMoves.length)];
+}
+
+// --- Drawing ---
+function drawBoard() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      ctx.strokeStyle = "black";
+      ctx.strokeRect(c * cellSize, r * cellSize, cellSize, cellSize);
+      const cell = board[r][c];
+      if (cell.count > 0) {
+        ctx.fillStyle = cell.owner === red ? "red" : "green";
+        const radius = 10 + 5 * (cell.count - 1);
+        ctx.beginPath();
+        ctx.arc(c * cellSize + cellSize / 2, r * cellSize + cellSize / 2, radius, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.fillStyle = "white";
+        ctx.font = "bold 16px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(cell.count, c * cellSize + cellSize / 2, r * cellSize + cellSize / 2);
+      }
+      if (isUnstable(board, r, c)) {
+        ctx.strokeStyle = "yellow";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(c * cellSize + 1, r * cellSize + 1, cellSize - 2, cellSize - 2);
+        ctx.lineWidth = 1;
+      }
+    }
+  }
+}
+
+const turnEl = document.getElementById("turnIndicator");
+
+function updateTurnIndicator() {
+  if (gameEnded) return;
+  turnEl.textContent = currentPlayer === red ? "Your turn" : "AI's turn";
+}
+
+function finishMove() {
+  isAnimating = false;
+  const winner = gameOver(board);
+  if (winner !== 0) {
+    gameEnded = true;
+    const msg = winner === red ? "You win!" : "AI wins!";
+    turnEl.textContent = msg;
+    setTimeout(() => alert(msg), 10);
+    return;
+  }
+  currentPlayer = -currentPlayer;
+  updateTurnIndicator();
+  if (currentPlayer === green) {
+    setTimeout(() => aiTurn(), 500);
+  }
+}
+
+function aiTurn() {
+  const move = getAIMove();
+  if (move === null) {
+    currentPlayer = red;
+    updateTurnIndicator();
+    return;
+  }
+  const [row, col] = move;
+  makeMove(board, row, col, green);
+  const useAnimation = document.getElementById("animateCheckbox").checked;
+  if (useAnimation) {
+    isAnimating = true;
+    drawBoard();
+    resolveAnimated(board, green, () => {
+      drawBoard();
+      finishMove();
+    });
+  } else {
+    resolve(board, green);
+    drawBoard();
+    finishMove();
+  }
+}
+
+canvas.addEventListener("click", (e) => {
+  if (gameEnded || isAnimating || currentPlayer !== red) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+  const row = Math.floor(y / cellSize);
+  const col = Math.floor(x / cellSize);
+
+  if (!makeMove(board, row, col, red)) return;
+
+  const useAnimation = document.getElementById("animateCheckbox").checked;
+  if (useAnimation) {
+    isAnimating = true;
+    drawBoard();
+    resolveAnimated(board, red, () => {
+      drawBoard();
+      finishMove();
+    });
+  } else {
+    resolve(board, red);
+    drawBoard();
+    finishMove();
+  }
+});
+
+drawBoard();
+updateTurnIndicator();
+</script>
+</body>
+</html>
