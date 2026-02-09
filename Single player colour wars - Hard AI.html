@@ -20,323 +20,406 @@
 <script>
 const rows = 7;
 const cols = 7;
+const N = rows * cols;
 const cellSize = 50;
-const red = 1;   // player
-const green = -1; // AI
+const red = 1;
+const green = -1;
 
 const WIN_SCORE = 1e8;
 const LOSS_SCORE = -1e8;
-const AI_TIME_LIMIT_MS = 5000; // maximum 5 seconds, then play best move found
+const AI_TIME_LIMIT_MS = 5000;
+const MAX_DEPTH = 12;
+const MAX_ANIMATION_STEPS = 60;
+const EXPLOSION_DELAY_MS = 380;
+const TT_SIZE = 65536;
 
-let board = Array(rows).fill().map(() =>
-  Array(cols).fill().map(() => ({ count: 0, owner: 0 }))
-);
-board[1][1] = { count: 1, owner: red };
-board[5][5] = { count: 1, owner: green };
+function idx(r, c) { return r * cols + c; }
+
+// --- Typed-array board (single allocation, no object churn) ---
+const board = {
+  count: new Uint8Array(N),
+  owner: new Int8Array(N)
+};
+board.owner[idx(1, 1)] = red;
+board.count[idx(1, 1)] = 1;
+board.owner[idx(5, 5)] = green;
+board.count[idx(5, 5)] = 1;
 
 let currentPlayer = red;
 let gameEnded = false;
 let redHasPlayed = true;
 let greenHasPlayed = true;
 let isAnimating = false;
-const EXPLOSION_DELAY_MS = 380;
 
 const canvas = document.getElementById("boardCanvas");
 const ctx = canvas.getContext("2d");
 const aiStatusEl = document.getElementById("aiStatus");
 
-// --- Helpers ---
-function criticalMass() { return 4; }
+// --- Undo diffs (per-level, no full-board copy) ---
+const DIFF_CELLS = 49;
+const diffIdx = new Uint16Array((MAX_DEPTH + 1) * DIFF_CELLS);
+const diffCount = new Uint8Array((MAX_DEPTH + 1) * DIFF_CELLS);
+const diffOwner = new Int8Array((MAX_DEPTH + 1) * DIFF_CELLS);
+const diffLen = new Uint8Array(MAX_DEPTH + 1);
+let recLevel = -1;
 
-function neighbors(rows, cols, row, col) {
-  const result = [];
-  if (row > 0) result.push([row - 1, col]);
-  if (row < rows - 1) result.push([row + 1, col]);
-  if (col > 0) result.push([row, col - 1]);
-  if (col < cols - 1) result.push([row, col + 1]);
-  return result;
+function diffBase(d) { return d * DIFF_CELLS; }
+
+function recordCell(b, i) {
+  if (recLevel < 0) return;
+  const base = diffBase(recLevel);
+  const pos = diffLen[recLevel];
+  diffIdx[base + pos] = i;
+  diffCount[base + pos] = b.count[i];
+  diffOwner[base + pos] = b.owner[i];
+  diffLen[recLevel]++;
 }
 
-// Pre-allocated save stack for minimax (avoids O(b^depth) board allocations).
-const MAX_DEPTH = 12;
-const savedStack = Array(MAX_DEPTH + 1).fill(null).map(() =>
-  Array(rows).fill(null).map(() => Array(cols).fill(null).map(() => ({ count: 0, owner: 0 })))
-);
-
-function saveBoard(dest, src) {
-  for (let r = 0; r < rows; r++)
-    for (let c = 0; c < cols; c++) {
-      dest[r][c].count = src[r][c].count;
-      dest[r][c].owner = src[r][c].owner;
-    }
+function undoDiff(b, level) {
+  const base = diffBase(level);
+  let pos = diffLen[level];
+  while (pos--) {
+    const i = diffIdx[base + pos];
+    b.count[i] = diffCount[base + pos];
+    b.owner[i] = diffOwner[base + pos];
+  }
+  diffLen[level] = 0;
 }
 
-function restoreBoard(dest, src) {
-  for (let r = 0; r < rows; r++)
-    for (let c = 0; c < cols; c++) {
-      dest[r][c].count = src[r][c].count;
-      dest[r][c].owner = src[r][c].owner;
-    }
+// --- Transposition table (fixed size, no recomputation) ---
+const ttHash = new Uint32Array(TT_SIZE);
+const ttScore = new Int32Array(TT_SIZE);
+const ttDepth = new Int8Array(TT_SIZE);
+const ttFlag = new Uint8Array(TT_SIZE); // 0=exact, 1=lower, 2=upper
+
+function hashBoard(b) {
+  let h = 0;
+  for (let i = 0; i < N; i++)
+    h = ((h * 31) + b.count[i] * 2 + (b.owner[i] + 1)) | 0;
+  return h >>> 0;
 }
 
-// Apply move and resolve in-place (mutates board). No allocation.
-function applyMoveInPlace(board, row, col, player) {
-  makeMove(board, row, col, player);
-  resolve(board, player);
-}
-
-// --- Game logic ---
-function makeMove(board, row, col, player) {
-  if (row < 0 || row >= rows || col < 0 || col >= cols) return false;
-  if (board[row][col].owner !== player) return false;
-  board[row][col].count += 1;
-  board[row][col].owner = player;
+const ttOut = { score: 0, flag: 0 };
+function ttLookup(h, depth, out) {
+  const i = h % TT_SIZE;
+  if (ttHash[i] !== h || ttDepth[i] < depth) return false;
+  out.score = ttScore[i];
+  out.flag = ttFlag[i];
   return true;
 }
 
-function isUnstable(board, row, col) {
-  return board[row][col].count >= criticalMass();
+function ttStore(h, depth, score, flag) {
+  const i = h % TT_SIZE;
+  ttHash[i] = h;
+  ttScore[i] = score;
+  ttDepth[i] = depth;
+  ttFlag[i] = flag;
 }
 
-function explode(board, row, col, player) {
-  const count = board[row][col].count;
+// --- Pre-allocated neighbors (no array allocation in hot path) ---
+const NEIGHBORS_Out = new Uint8Array(8);
+
+function neighborsCount(r, c) {
+  let n = 0;
+  if (r > 0) { NEIGHBORS_Out[n++] = r - 1; NEIGHBORS_Out[n++] = c; }
+  if (r < rows - 1) { NEIGHBORS_Out[n++] = r + 1; NEIGHBORS_Out[n++] = c; }
+  if (c > 0) { NEIGHBORS_Out[n++] = r; NEIGHBORS_Out[n++] = c - 1; }
+  if (c < cols - 1) { NEIGHBORS_Out[n++] = r; NEIGHBORS_Out[n++] = c + 1; }
+  return n >>> 1;
+}
+
+// --- Pre-allocated moves buffer ---
+const movesBuf = new Int8Array(98);
+let movesCount = 0;
+
+function criticalMass() { return 4; }
+
+// --- Game logic (typed-array + optional diff recording) ---
+function makeMove(b, row, col, player) {
+  if (row < 0 || row >= rows || col < 0 || col >= cols) return false;
+  const i = idx(row, col);
+  if (b.owner[i] !== player) return false;
+  recordCell(b, i);
+  b.count[i] += 1;
+  b.owner[i] = player;
+  return true;
+}
+
+function isUnstable(b, r, c) {
+  return b.count[idx(r, c)] >= criticalMass();
+}
+
+function explode(b, row, col, player) {
+  const i = idx(row, col);
+  const count = b.count[i];
   const orbsPerNeighbor = count - 3;
-  board[row][col].count = 0;
-  board[row][col].owner = 0;
-  for (const [r, c] of neighbors(rows, cols, row, col)) {
-    board[r][c].count += orbsPerNeighbor;
-    board[r][c].owner = player;
+  recordCell(b, i);
+  b.count[i] = 0;
+  b.owner[i] = 0;
+  const nn = neighborsCount(row, col);
+  for (let k = 0; k < nn; k++) {
+    const r2 = NEIGHBORS_Out[k * 2], c2 = NEIGHBORS_Out[k * 2 + 1];
+    const j = idx(r2, c2);
+    recordCell(b, j);
+    b.count[j] += orbsPerNeighbor;
+    b.owner[j] = player;
   }
 }
 
-function resolve(board, player) {
+function resolve(b, player) {
   let changed = true;
   while (changed) {
     changed = false;
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        if (isUnstable(board, r, c)) {
-          explode(board, r, c, player);
+    for (let r = 0; r < rows; r++)
+      for (let c = 0; c < cols; c++)
+        if (isUnstable(b, r, c)) {
+          explode(b, r, c, player);
           changed = true;
         }
-      }
-    }
   }
 }
 
-function resolveOneStep(board, player) {
+function resolveOneStep(b, player) {
   let changed = false;
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      if (isUnstable(board, r, c)) {
-        explode(board, r, c, player);
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++)
+      if (isUnstable(b, r, c)) {
+        explode(b, r, c, player);
         changed = true;
       }
-    }
-  }
   return changed;
 }
 
-const MAX_ANIMATION_STEPS = 60; // cap to avoid too many queued timeouts
+// --- Animation: single closure, state machine (no recursive setTimeout) ---
+let animationState = null;
 
-function resolveAnimated(board, player, onDone, steps) {
-  const n = (steps || 0) + 1;
-  if (!resolveOneStep(board, player)) {
-    onDone();
+function animationTick() {
+  if (!animationState) return;
+  const s = animationState;
+  s.steps++;
+  if (!resolveOneStep(s.board, s.player)) {
+    s.onDone();
+    animationState = null;
     return;
   }
   drawBoard();
-  if (n >= MAX_ANIMATION_STEPS) {
-    resolve(board, player);
+  if (s.steps >= MAX_ANIMATION_STEPS) {
+    resolve(s.board, s.player);
     drawBoard();
-    onDone();
+    s.onDone();
+    animationState = null;
     return;
   }
-  setTimeout(() => resolveAnimated(board, player, onDone, n), EXPLOSION_DELAY_MS);
+  setTimeout(animationTick, EXPLOSION_DELAY_MS);
 }
 
-function getValidMoves(board, player) {
-  const moves = [];
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      if (board[r][c].owner === player) moves.push([r, c]);
-    }
-  }
-  return moves;
+function resolveAnimated(b, player, onDone) {
+  animationState = { board: b, player, onDone, steps: 0 };
+  setTimeout(animationTick, EXPLOSION_DELAY_MS);
 }
 
-// Terminal check for search (no "hasPlayed" — we're deep in the tree).
-function gameOverForSearch(board) {
+function getValidMoves(b, player) {
+  movesCount = 0;
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++)
+      if (b.owner[idx(r, c)] === player) {
+        movesBuf[movesCount * 2] = r;
+        movesBuf[movesCount * 2 + 1] = c;
+        movesCount++;
+      }
+}
+
+function gameOverForSearch(b) {
   let redOrbs = 0, greenOrbs = 0;
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      if (board[r][c].owner === red) redOrbs += board[r][c].count;
-      if (board[r][c].owner === green) greenOrbs += board[r][c].count;
-    }
+  for (let i = 0; i < N; i++) {
+    if (b.owner[i] === red) redOrbs += b.count[i];
+    if (b.owner[i] === green) greenOrbs += b.count[i];
   }
-  if (redOrbs > 0 && greenOrbs === 0) return green; // AI wins
-  if (greenOrbs > 0 && redOrbs === 0) return red;  // player wins
+  if (redOrbs > 0 && greenOrbs === 0) return green;
+  if (greenOrbs > 0 && redOrbs === 0) return red;
   return 0;
 }
 
-// Evaluation from AI's perspective: positive = good for AI (green).
-function evaluate(board) {
-  let redOrbs = 0, greenOrbs = 0;
-  let redCells = 0, greenCells = 0;
+function evaluate(b) {
+  let redOrbs = 0, greenOrbs = 0, redCells = 0, greenCells = 0;
   let greenNearCritical = 0, redNearCritical = 0;
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const cell = board[r][c];
-      if (cell.owner === red) {
-        redOrbs += cell.count;
-        redCells += 1;
-        if (cell.count >= 3) redNearCritical += cell.count;
-      } else if (cell.owner === green) {
-        greenOrbs += cell.count;
-        greenCells += 1;
-        if (cell.count >= 3) greenNearCritical += cell.count;
-      }
+  for (let i = 0; i < N; i++) {
+    const o = b.owner[i], c = b.count[i];
+    if (o === red) {
+      redOrbs += c;
+      redCells++;
+      if (c >= 3) redNearCritical += c;
+    } else if (o === green) {
+      greenOrbs += c;
+      greenCells++;
+      if (c >= 3) greenNearCritical += c;
     }
   }
-  const material = (greenOrbs - redOrbs) * 10;
-  const mobility = (greenCells - redCells) * 3;
-  const threat = (greenNearCritical - redNearCritical) * 2;
-  return material + mobility + threat;
+  return (greenOrbs - redOrbs) * 10 + (greenCells - redCells) * 3 + (greenNearCritical - redNearCritical) * 2;
 }
 
-let searchStartTime = 0;
-let searchAbort = false;
-
-// In-place minimax using pre-allocated savedStack[saveIndex] to save/restore. No board allocation.
-function minimax(board, depth, alpha, beta, isAITurn, saveIndex) {
-  if (searchAbort) return 0;
-  if (Date.now() - searchStartTime > AI_TIME_LIMIT_MS) {
-    searchAbort = true;
-    return evaluate(board);
-  }
-
-  const winner = gameOverForSearch(board);
-  if (winner === green) return WIN_SCORE - (100 - depth);
-  if (winner === red) return LOSS_SCORE + (100 - depth);
-  if (depth <= 0) return evaluate(board);
-
-  const saved = savedStack[saveIndex];
-
-  if (isAITurn) {
-    const moves = getValidMoves(board, green);
-    if (moves.length === 0) return evaluate(board);
-    let maxEval = LOSS_SCORE - 1;
-    for (const [r, c] of moves) {
-      saveBoard(saved, board);
-      applyMoveInPlace(board, r, c, green);
-      const eval = minimax(board, depth - 1, alpha, beta, false, saveIndex + 1);
-      restoreBoard(board, saved);
-      maxEval = Math.max(maxEval, eval);
-      alpha = Math.max(alpha, eval);
-      if (beta <= alpha) break;
-    }
-    return maxEval;
-  } else {
-    const moves = getValidMoves(board, red);
-    if (moves.length === 0) return evaluate(board);
-    let minEval = WIN_SCORE + 1;
-    for (const [r, c] of moves) {
-      saveBoard(saved, board);
-      applyMoveInPlace(board, r, c, red);
-      const eval = minimax(board, depth - 1, alpha, beta, true, saveIndex + 1);
-      restoreBoard(board, saved);
-      minEval = Math.min(minEval, eval);
-      beta = Math.min(beta, eval);
-      if (beta <= alpha) break;
-    }
-    return minEval;
-  }
-}
-
-// Cheap move score for ordering only (no board copy).
-function scoreMoveOrdering(board, row, col, player) {
-  const cell = board[row][col];
-  let s = cell.count * 4 + (cell.count === 3 ? 8 : 0);
-  const adj = neighbors(rows, cols, row, col);
-  for (const [r, c] of adj) {
-    const o = board[r][c].owner;
+function scoreMoveOrdering(b, row, col, player) {
+  const i = idx(row, col);
+  let s = b.count[i] * 4 + (b.count[i] === 3 ? 8 : 0);
+  const nn = neighborsCount(row, col);
+  for (let k = 0; k < nn; k++) {
+    const r2 = NEIGHBORS_Out[k * 2], c2 = NEIGHBORS_Out[k * 2 + 1];
+    const o = b.owner[idx(r2, c2)];
     if (o !== 0 && o !== player) s += 6;
-    if (o === player && board[r][c].count >= 2) s += 2;
+    if (o === player && b.count[idx(r2, c2)] >= 2) s += 2;
   }
   const center = (rows - 1) / 2;
   s -= Math.abs(row - center) + Math.abs(col - center);
   return s;
 }
 
-// Iterative deepening: one scratch board (savedStack[0]) at root; in-place search below. No per-node allocation.
-function getBestMove() {
-  let moves = getValidMoves(board, green);
-  if (moves.length === 0) return null;
-  if (moves.length === 1) return { move: moves[0], depth: 0 };
+let searchStartTime = 0;
+let searchAbort = false;
 
-  // Move ordering: cheap heuristic only (no board copies).
-  moves = moves.slice().sort((a, b) => scoreMoveOrdering(board, b[0], b[1], green) - scoreMoveOrdering(board, a[0], a[1], green));
+function applyMoveInPlace(b, row, col, player, saveIndex) {
+  recLevel = saveIndex;
+  diffLen[saveIndex] = 0;
+  makeMove(b, row, col, player);
+  resolve(b, player);
+  recLevel = -1;
+}
+
+function minimax(b, depth, alpha, beta, isAITurn, saveIndex) {
+  if (searchAbort) return 0;
+  if (Date.now() - searchStartTime > AI_TIME_LIMIT_MS) {
+    searchAbort = true;
+    return evaluate(b);
+  }
+
+  const winner = gameOverForSearch(b);
+  if (winner === green) return WIN_SCORE - (100 - depth);
+  if (winner === red) return LOSS_SCORE + (100 - depth);
+  if (depth <= 0) return evaluate(b);
+
+  const h = hashBoard(b);
+  if (ttLookup(h, depth, ttOut)) {
+    if (ttOut.flag === 0) return ttOut.score;
+    if (ttOut.flag === 1 && ttOut.score >= beta) return ttOut.score;
+    if (ttOut.flag === 2 && ttOut.score <= alpha) return ttOut.score;
+  }
+
+  const player = isAITurn ? green : red;
+  getValidMoves(b, player);
+  if (movesCount === 0) {
+    const sc = evaluate(b);
+    ttStore(h, depth, sc, 0);
+    return sc;
+  }
+
+  let bestScore = isAITurn ? LOSS_SCORE - 1 : WIN_SCORE + 1;
+  let flag = 0;
+
+  if (isAITurn) {
+    for (let m = 0; m < movesCount; m++) {
+      const r = movesBuf[m * 2], c = movesBuf[m * 2 + 1];
+      applyMoveInPlace(b, r, c, green, saveIndex);
+      const sc = minimax(b, depth - 1, alpha, beta, false, saveIndex + 1);
+      undoDiff(b, saveIndex);
+      if (sc > bestScore) bestScore = sc;
+      alpha = Math.max(alpha, sc);
+      if (beta <= alpha) { flag = 2; break; }
+    }
+  } else {
+    for (let m = 0; m < movesCount; m++) {
+      const r = movesBuf[m * 2], c = movesBuf[m * 2 + 1];
+      applyMoveInPlace(b, r, c, red, saveIndex);
+      const sc = minimax(b, depth - 1, alpha, beta, true, saveIndex + 1);
+      undoDiff(b, saveIndex);
+      if (sc < bestScore) bestScore = sc;
+      beta = Math.min(beta, sc);
+      if (beta <= alpha) { flag = 1; break; }
+    }
+  }
+
+  if (bestScore <= alpha) flag = 2;
+  else if (bestScore >= beta) flag = 1;
+  ttStore(h, depth, bestScore, flag);
+  return bestScore;
+}
+
+function getBestMove() {
+  getValidMoves(board, green);
+  if (movesCount === 0) return null;
+  if (movesCount === 1) return { move: [movesBuf[0], movesBuf[1]], depth: 0 };
+
+  for (let i = 0; i < movesCount - 1; i++)
+    for (let j = i + 1; j < movesCount; j++) {
+      const sa = scoreMoveOrdering(board, movesBuf[i * 2], movesBuf[i * 2 + 1], green);
+      const sb = scoreMoveOrdering(board, movesBuf[j * 2], movesBuf[j * 2 + 1], green);
+      if (sb > sa) {
+        const r0 = movesBuf[i * 2], c0 = movesBuf[i * 2 + 1];
+        movesBuf[i * 2] = movesBuf[j * 2];
+        movesBuf[i * 2 + 1] = movesBuf[j * 2 + 1];
+        movesBuf[j * 2] = r0;
+        movesBuf[j * 2 + 1] = c0;
+      }
+    }
 
   searchStartTime = Date.now();
   searchAbort = false;
-  let bestMove = moves[0];
+  ttHash.fill(0);
+  let bestR = movesBuf[0], bestC = movesBuf[1];
   let bestScore = LOSS_SCORE - 1;
   let completedDepth = 0;
-  const rootSave = savedStack[0];
 
   for (let depth = 1; depth <= MAX_DEPTH && !searchAbort; depth++) {
     let alpha = LOSS_SCORE - 1;
-    let depthBestMove = null;
+    let depthBestR = -1, depthBestC = -1;
     let depthBestScore = LOSS_SCORE - 1;
 
-    for (const [r, c] of moves) {
+    for (let m = 0; m < movesCount; m++) {
       if (searchAbort) break;
-      saveBoard(rootSave, board);
-      applyMoveInPlace(board, r, c, green);
-      const eval = minimax(board, depth - 1, alpha, WIN_SCORE + 1, false, 1);
-      restoreBoard(board, rootSave);
-      if (eval > depthBestScore) {
-        depthBestScore = eval;
-        depthBestMove = [r, c];
+      const r = movesBuf[m * 2], c = movesBuf[m * 2 + 1];
+      applyMoveInPlace(board, r, c, green, 0);
+      const sc = minimax(board, depth - 1, alpha, WIN_SCORE + 1, false, 1);
+      undoDiff(board, 0);
+      if (sc > depthBestScore) {
+        depthBestScore = sc;
+        depthBestR = r;
+        depthBestC = c;
       }
-      alpha = Math.max(alpha, eval);
+      alpha = Math.max(alpha, sc);
     }
 
     if (searchAbort) break;
-    if (depthBestMove !== null) {
-      bestMove = depthBestMove;
+    if (depthBestR >= 0) {
+      bestR = depthBestR;
+      bestC = depthBestC;
       bestScore = depthBestScore;
       completedDepth = depth;
     }
   }
 
-  return { move: bestMove, depth: completedDepth };
+  return { move: [bestR, bestC], depth: completedDepth };
 }
 
-function gameOver(board) {
+function gameOver(b) {
   let redOrbs = 0, greenOrbs = 0;
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      if (board[r][c].owner === red) redOrbs += board[r][c].count;
-      if (board[r][c].owner === green) greenOrbs += board[r][c].count;
-    }
+  for (let i = 0; i < N; i++) {
+    if (board.owner[i] === red) redOrbs += board.count[i];
+    if (board.owner[i] === green) greenOrbs += board.count[i];
   }
   if (redOrbs > 0 && greenOrbs === 0 && greenHasPlayed) return red;
   if (greenOrbs > 0 && redOrbs === 0 && redHasPlayed) return green;
   return 0;
 }
 
-// --- Drawing ---
 function drawBoard() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
+      const i = idx(r, c);
       ctx.strokeStyle = "black";
       ctx.strokeRect(c * cellSize, r * cellSize, cellSize, cellSize);
-      const cell = board[r][c];
-      if (cell.count > 0) {
-        ctx.fillStyle = cell.owner === red ? "red" : "green";
-        const radius = 10 + 5 * (cell.count - 1);
+      const cnt = board.count[i], own = board.owner[i];
+      if (cnt > 0) {
+        ctx.fillStyle = own === red ? "red" : "green";
+        const radius = 10 + 5 * (cnt - 1);
         ctx.beginPath();
         ctx.arc(c * cellSize + cellSize / 2, r * cellSize + cellSize / 2, radius, 0, 2 * Math.PI);
         ctx.fill();
@@ -344,7 +427,7 @@ function drawBoard() {
         ctx.font = "bold 16px Arial";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(cell.count, c * cellSize + cellSize / 2, r * cellSize + cellSize / 2);
+        ctx.fillText(cnt, c * cellSize + cellSize / 2, r * cellSize + cellSize / 2);
       }
       if (isUnstable(board, r, c)) {
         ctx.strokeStyle = "yellow";
@@ -366,7 +449,7 @@ function updateTurnIndicator() {
 
 function finishMove() {
   isAnimating = false;
-  const winner = gameOver(board);
+  const winner = gameOver();
   if (winner !== 0) {
     gameEnded = true;
     const msg = winner === red ? "You win!" : "AI wins!";
@@ -400,7 +483,7 @@ function aiTurn() {
   if (useAnimation) {
     isAnimating = true;
     drawBoard();
-    resolveAnimated(board, green, () => {
+    resolveAnimated(board, green, function onAnimDone() {
       drawBoard();
       finishMove();
     });
@@ -428,7 +511,7 @@ canvas.addEventListener("click", (e) => {
   if (useAnimation) {
     isAnimating = true;
     drawBoard();
-    resolveAnimated(board, red, () => {
+    resolveAnimated(board, red, function onAnimDone() {
       drawBoard();
       finishMove();
     });

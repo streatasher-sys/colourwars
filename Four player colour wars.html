@@ -110,21 +110,31 @@ function resolveOneStep(board, player) {
 }
 
 const MAX_ANIMATION_STEPS = 60;
+let animationState = null;
 
-function resolveAnimated(board, player, onDone, steps) {
-  const n = (steps || 0) + 1;
-  if (!resolveOneStep(board, player)) {
-    onDone();
+function animationTick() {
+  if (!animationState) return;
+  const s = animationState;
+  s.steps++;
+  if (!resolveOneStep(s.board, s.player)) {
+    s.onDone();
+    animationState = null;
     return;
   }
   drawBoard();
-  if (n >= MAX_ANIMATION_STEPS) {
-    resolve(board, player);
+  if (s.steps >= MAX_ANIMATION_STEPS) {
+    resolve(s.board, s.player);
     drawBoard();
-    onDone();
+    s.onDone();
+    animationState = null;
     return;
   }
-  setTimeout(() => resolveAnimated(board, player, onDone, n), EXPLOSION_DELAY_MS);
+  setTimeout(animationTick, EXPLOSION_DELAY_MS);
+}
+
+function resolveAnimated(board, player, onDone) {
+  animationState = { board, player, onDone, steps: 0 };
+  setTimeout(animationTick, EXPLOSION_DELAY_MS);
 }
 
 function countOrbsByPlayer(board) {
