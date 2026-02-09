@@ -103,13 +103,22 @@ function resolveOneStep(board, player) {
   return changed;
 }
 
-function resolveAnimated(board, player, onDone) {
+const MAX_ANIMATION_STEPS = 60;
+
+function resolveAnimated(board, player, onDone, steps) {
+  const n = (steps || 0) + 1;
   if (!resolveOneStep(board, player)) {
     onDone();
     return;
   }
   drawBoard();
-  setTimeout(() => resolveAnimated(board, player, onDone), EXPLOSION_DELAY_MS);
+  if (n >= MAX_ANIMATION_STEPS) {
+    resolve(board, player);
+    drawBoard();
+    onDone();
+    return;
+  }
+  setTimeout(() => resolveAnimated(board, player, onDone, n), EXPLOSION_DELAY_MS);
 }
 
 function gameOver(board) {

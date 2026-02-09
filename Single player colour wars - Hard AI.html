@@ -57,8 +57,32 @@ function neighbors(rows, cols, row, col) {
   return result;
 }
 
-function copyBoard(board) {
-  return board.map(row => row.map(cell => ({ count: cell.count, owner: cell.owner })));
+// Pre-allocated save stack for minimax (avoids O(b^depth) board allocations).
+const MAX_DEPTH = 12;
+const savedStack = Array(MAX_DEPTH + 1).fill(null).map(() =>
+  Array(rows).fill(null).map(() => Array(cols).fill(null).map(() => ({ count: 0, owner: 0 })))
+);
+
+function saveBoard(dest, src) {
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      dest[r][c].count = src[r][c].count;
+      dest[r][c].owner = src[r][c].owner;
+    }
+}
+
+function restoreBoard(dest, src) {
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      dest[r][c].count = src[r][c].count;
+      dest[r][c].owner = src[r][c].owner;
+    }
+}
+
+// Apply move and resolve in-place (mutates board). No allocation.
+function applyMoveInPlace(board, row, col, player) {
+  makeMove(board, row, col, player);
+  resolve(board, player);
 }
 
 // --- Game logic ---
@@ -113,13 +137,22 @@ function resolveOneStep(board, player) {
   return changed;
 }
 
-function resolveAnimated(board, player, onDone) {
+const MAX_ANIMATION_STEPS = 60; // cap to avoid too many queued timeouts
+
+function resolveAnimated(board, player, onDone, steps) {
+  const n = (steps || 0) + 1;
   if (!resolveOneStep(board, player)) {
     onDone();
     return;
   }
   drawBoard();
-  setTimeout(() => resolveAnimated(board, player, onDone), EXPLOSION_DELAY_MS);
+  if (n >= MAX_ANIMATION_STEPS) {
+    resolve(board, player);
+    drawBoard();
+    onDone();
+    return;
+  }
+  setTimeout(() => resolveAnimated(board, player, onDone, n), EXPLOSION_DELAY_MS);
 }
 
 function getValidMoves(board, player) {
@@ -130,14 +163,6 @@ function getValidMoves(board, player) {
     }
   }
   return moves;
-}
-
-// Apply a move on a copy of the board; returns new board (does not mutate original).
-function applyMove(board, row, col, player) {
-  const next = copyBoard(board);
-  makeMove(next, row, col, player);
-  resolve(next, player);
-  return next;
 }
 
 // Terminal check for search (no "hasPlayed" — we're deep in the tree).
@@ -182,7 +207,8 @@ function evaluate(board) {
 let searchStartTime = 0;
 let searchAbort = false;
 
-function minimax(board, depth, alpha, beta, isAITurn) {
+// In-place minimax using pre-allocated savedStack[saveIndex] to save/restore. No board allocation.
+function minimax(board, depth, alpha, beta, isAITurn, saveIndex) {
   if (searchAbort) return 0;
   if (Date.now() - searchStartTime > AI_TIME_LIMIT_MS) {
     searchAbort = true;
@@ -190,17 +216,21 @@ function minimax(board, depth, alpha, beta, isAITurn) {
   }
 
   const winner = gameOverForSearch(board);
-  if (winner === green) return WIN_SCORE - (100 - depth); // prefer faster wins
-  if (winner === red) return LOSS_SCORE + (100 - depth);  // prefer slower losses
+  if (winner === green) return WIN_SCORE - (100 - depth);
+  if (winner === red) return LOSS_SCORE + (100 - depth);
   if (depth <= 0) return evaluate(board);
+
+  const saved = savedStack[saveIndex];
 
   if (isAITurn) {
     const moves = getValidMoves(board, green);
     if (moves.length === 0) return evaluate(board);
     let maxEval = LOSS_SCORE - 1;
     for (const [r, c] of moves) {
-      const child = applyMove(board, r, c, green);
-      const eval = minimax(child, depth - 1, alpha, beta, false);
+      saveBoard(saved, board);
+      applyMoveInPlace(board, r, c, green);
+      const eval = minimax(board, depth - 1, alpha, beta, false, saveIndex + 1);
+      restoreBoard(board, saved);
       maxEval = Math.max(maxEval, eval);
       alpha = Math.max(alpha, eval);
       if (beta <= alpha) break;
@@ -211,8 +241,10 @@ function minimax(board, depth, alpha, beta, isAITurn) {
     if (moves.length === 0) return evaluate(board);
     let minEval = WIN_SCORE + 1;
     for (const [r, c] of moves) {
-      const child = applyMove(board, r, c, red);
-      const eval = minimax(child, depth - 1, alpha, beta, true);
+      saveBoard(saved, board);
+      applyMoveInPlace(board, r, c, red);
+      const eval = minimax(board, depth - 1, alpha, beta, true, saveIndex + 1);
+      restoreBoard(board, saved);
       minEval = Math.min(minEval, eval);
       beta = Math.min(beta, eval);
       if (beta <= alpha) break;
@@ -221,34 +253,48 @@ function minimax(board, depth, alpha, beta, isAITurn) {
   }
 }
 
-// Iterative deepening: search depth 1, 2, 3, ... until time runs out. Returns { move, depth }.
+// Cheap move score for ordering only (no board copy).
+function scoreMoveOrdering(board, row, col, player) {
+  const cell = board[row][col];
+  let s = cell.count * 4 + (cell.count === 3 ? 8 : 0);
+  const adj = neighbors(rows, cols, row, col);
+  for (const [r, c] of adj) {
+    const o = board[r][c].owner;
+    if (o !== 0 && o !== player) s += 6;
+    if (o === player && board[r][c].count >= 2) s += 2;
+  }
+  const center = (rows - 1) / 2;
+  s -= Math.abs(row - center) + Math.abs(col - center);
+  return s;
+}
+
+// Iterative deepening: one scratch board (savedStack[0]) at root; in-place search below. No per-node allocation.
 function getBestMove() {
   let moves = getValidMoves(board, green);
   if (moves.length === 0) return null;
   if (moves.length === 1) return { move: moves[0], depth: 0 };
 
-  // Move ordering: try moves that look good first (better alpha-beta pruning).
-  moves = moves.slice().sort((a, b) => {
-    const scoreA = evaluate(applyMove(board, a[0], a[1], green));
-    const scoreB = evaluate(applyMove(board, b[0], b[1], green));
-    return scoreB - scoreA;
-  });
+  // Move ordering: cheap heuristic only (no board copies).
+  moves = moves.slice().sort((a, b) => scoreMoveOrdering(board, b[0], b[1], green) - scoreMoveOrdering(board, a[0], a[1], green));
 
   searchStartTime = Date.now();
   searchAbort = false;
   let bestMove = moves[0];
   let bestScore = LOSS_SCORE - 1;
   let completedDepth = 0;
+  const rootSave = savedStack[0];
 
-  for (let depth = 1; depth <= 12 && !searchAbort; depth++) {
+  for (let depth = 1; depth <= MAX_DEPTH && !searchAbort; depth++) {
     let alpha = LOSS_SCORE - 1;
     let depthBestMove = null;
     let depthBestScore = LOSS_SCORE - 1;
 
     for (const [r, c] of moves) {
       if (searchAbort) break;
-      const child = applyMove(board, r, c, green);
-      const eval = minimax(child, depth - 1, alpha, WIN_SCORE + 1, false);
+      saveBoard(rootSave, board);
+      applyMoveInPlace(board, r, c, green);
+      const eval = minimax(board, depth - 1, alpha, WIN_SCORE + 1, false, 1);
+      restoreBoard(board, rootSave);
       if (eval > depthBestScore) {
         depthBestScore = eval;
         depthBestMove = [r, c];
