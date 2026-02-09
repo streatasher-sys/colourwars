@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Colour Wars — Online 4 Player</title>
+  <style>
+    body { display: flex; flex-direction: column; align-items: center; margin-top: 30px; font-family: sans-serif; }
+    #lobby { text-align: center; }
+    #lobby button, #lobby input { font-size: 16px; padding: 10px 16px; margin: 8px; }
+    #gameArea { display: none; }
+    canvas { border: 2px solid black; display: block; }
+    #turnIndicator { margin-bottom: 10px; font-size: 18px; font-weight: bold; min-height: 1.5em; }
+    #roomCode { margin-bottom: 8px; font-size: 14px; color: #666; }
+    #roomCode span { font-weight: bold; letter-spacing: 2px; }
+    #playerCount { margin-bottom: 6px; font-size: 14px; color: #444; }
+  </style>
+</head>
+<body>
+<div id="lobby">
+  <h1>Colour Wars — Online 4 Player</h1>
+  <p>Create a game and share the room code. Up to 4 players (Red, Green, Blue, Yellow).</p>
+  <button id="createBtn">Create Game</button>
+  <div style="margin-top: 16px;">
+    <input type="text" id="joinInput" placeholder="Room code" maxlength="6" style="text-transform: uppercase;">
+    <button id="joinBtn">Join Game</button>
+  </div>
+  <p id="connectionStatus" style="margin-top: 12px; font-size: 14px; min-height: 1.2em;"></p>
+  <p id="lobbyMsg" style="margin-top: 8px; color: #c00; min-height: 1.2em;"></p>
+</div>
+
+<div id="gameArea">
+  <div id="roomCode">Room: <span id="roomCodeVal"></span></div>
+  <div id="playerCount"></div>
+  <div id="turnIndicator">Red's turn</div>
+  <canvas id="boardCanvas" width="350" height="350"></canvas>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+if (typeof io === "undefined") {
+  document.getElementById("lobbyMsg").textContent = "Cannot connect. Open this page via http://localhost:3000 (start the server with: npm start)";
+  document.getElementById("createBtn").disabled = true;
+  document.getElementById("joinBtn").disabled = true;
+} else {
+  const socket = io();
+  const statusEl = document.getElementById("connectionStatus");
+  statusEl.textContent = "Connecting...";
+  socket.on("connect", () => {
+    statusEl.textContent = "Connected";
+    statusEl.style.color = "#282";
+  });
+  socket.on("connect_error", () => {
+    statusEl.textContent = "Disconnected. Is the server running? (npm start)";
+    statusEl.style.color = "#c00";
+  });
+  socket.on("disconnect", () => {
+    statusEl.textContent = "Disconnected";
+    statusEl.style.color = "#c00";
+  });
+
+  const rows = 7;
+  const cols = 7;
+  const cellSize = 50;
+  const red = 1;
+  const green = 2;
+  const blue = 3;
+  const yellow = 4;
+  const PLAYERS = [red, green, blue, yellow];
+  const PLAYER_NAMES = { [red]: "Red", [green]: "Green", [blue]: "Blue", [yellow]: "Yellow" };
+  const PLAYER_COLORS = { [red]: "#c22", [green]: "#282", [blue]: "#26a", [yellow]: "#da4" };
+
+  let board = null;
+  let myPlayer = null;
+  let roomCode = null;
+  let currentPlayerIndex = 0;
+  let winner = 0;
+  let gameEnded = false;
+  let playerCount = 0;
+  const canvas = document.getElementById("boardCanvas");
+  const ctx = canvas.getContext("2d");
+
+  function showLobby(msg) {
+    document.getElementById("lobby").style.display = "block";
+    document.getElementById("gameArea").style.display = "none";
+    document.getElementById("lobbyMsg").textContent = msg || "";
+    document.getElementById("joinBtn").disabled = false;
+  }
+
+  function showGame() {
+    document.getElementById("lobby").style.display = "none";
+    document.getElementById("gameArea").style.display = "block";
+    document.getElementById("roomCodeVal").textContent = roomCode;
+    updatePlayerCount();
+  }
+
+  function updatePlayerCount() {
+    const el = document.getElementById("playerCount");
+    if (playerCount > 0) el.textContent = "Players: " + playerCount + "/4";
+    else el.textContent = "";
+  }
+
+  function isUnstable(board, row, col) {
+    return board[row][col].count >= 4;
+  }
+
+  function drawBoard() {
+    if (!board) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        ctx.strokeStyle = "black";
+        ctx.strokeRect(c * cellSize, r * cellSize, cellSize, cellSize);
+        const cell = board[r][c];
+        if (cell.count > 0) {
+          ctx.fillStyle = PLAYER_COLORS[cell.owner] || "gray";
+          const radius = 10 + 5 * (cell.count - 1);
+          ctx.beginPath();
+          ctx.arc(c * cellSize + cellSize / 2, r * cellSize + cellSize / 2, radius, 0, 2 * Math.PI);
+          ctx.fill();
+          ctx.fillStyle = cell.owner === yellow ? "#333" : "white";
+          ctx.font = "bold 16px Arial";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(cell.count, c * cellSize + cellSize / 2, r * cellSize + cellSize / 2);
+        }
+        if (isUnstable(board, r, c)) {
+          ctx.strokeStyle = "orange";
+          ctx.lineWidth = 3;
+          ctx.strokeRect(c * cellSize + 1, r * cellSize + 1, cellSize - 2, cellSize - 2);
+          ctx.lineWidth = 1;
+        }
+      }
+    }
+  }
+
+  function updateTurnIndicator() {
+    const turnEl = document.getElementById("turnIndicator");
+    if (winner !== 0) {
+      turnEl.textContent = PLAYER_NAMES[winner] + " wins!";
+      turnEl.style.color = PLAYER_COLORS[winner];
+      return;
+    }
+    const current = PLAYERS[currentPlayerIndex];
+    turnEl.textContent = PLAYER_NAMES[current] + "'s turn";
+    turnEl.style.color = PLAYER_COLORS[current] || "";
+  }
+
+  canvas.addEventListener("click", (e) => {
+    if (!board || gameEnded || winner !== 0) return;
+    if (PLAYERS[currentPlayerIndex] !== myPlayer) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    const row = Math.floor(y / cellSize);
+    const col = Math.floor(x / cellSize);
+
+    socket.emit("move", { code: roomCode, row, col });
+  });
+
+  socket.on("roomCreated", (data) => {
+    roomCode = data.code;
+    myPlayer = data.player;
+    playerCount = 1;
+    showGame();
+  });
+
+  socket.on("joinedRoom", (data) => {
+    roomCode = data.code;
+    myPlayer = data.player;
+    showGame();
+  });
+
+  socket.on("joinError", (msg) => {
+    document.getElementById("joinBtn").disabled = false;
+    document.getElementById("lobbyMsg").textContent = msg;
+  });
+
+  socket.on("gameState", (state) => {
+    board = state.board;
+    currentPlayerIndex = state.currentPlayerIndex ?? 0;
+    winner = state.winner || 0;
+    gameEnded = winner !== 0;
+    drawBoard();
+    updateTurnIndicator();
+    if (gameEnded) {
+      setTimeout(() => alert(PLAYER_NAMES[winner] + " wins!"), 100);
+    }
+  });
+
+  socket.on("playerJoined", (data) => {
+    playerCount = (data && data.count) ? data.count : (playerCount + 1);
+    if (playerCount > 4) playerCount = 4;
+    updatePlayerCount();
+    document.getElementById("roomCodeVal").textContent = roomCode + " (" + playerCount + "/4)";
+  });
+
+  socket.on("playerLeft", (data) => {
+    const name = data && data.player ? PLAYER_NAMES[data.player] : "A player";
+    alert(name + " left the game.");
+    roomCode = null;
+    board = null;
+    showLobby("Someone disconnected. Create or join a new game.");
+  });
+
+  document.getElementById("createBtn").addEventListener("click", () => {
+    socket.emit("createRoom4");
+  });
+
+  document.getElementById("joinBtn").addEventListener("click", () => {
+    const code = document.getElementById("joinInput").value.trim();
+    if (!code) {
+      document.getElementById("lobbyMsg").textContent = "Enter a room code";
+      return;
+    }
+    document.getElementById("joinBtn").disabled = true;
+    document.getElementById("lobbyMsg").textContent = "Joining...";
+    socket.emit("joinRoom4", code);
+  });
+
+  document.getElementById("joinInput").addEventListener("keypress", (e) => {
+    if (e.key === "Enter") document.getElementById("joinBtn").click();
+  });
+}
+</script>
+</body>
+</html>
