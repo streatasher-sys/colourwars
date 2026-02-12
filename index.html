@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Colour Wars</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: sans-serif; max-width: 420px; margin: 0 auto; padding: 20px; margin-top: 60px; }
+    #authHeader {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 50px;
+      background: #eee;
+      border-bottom: 1px solid #ccc;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding: 0 16px;
+      z-index: 100;
+    }
+    #authHeader .userArea {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    #authHeader .avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      object-fit: cover;
+      cursor: pointer;
+      background: #ccc;
+    }
+    #authHeader .username {
+      font-weight: 500;
+      color: #333;
+    }
+    #authHeader .addPhotoBtn {
+      font-size: 12px;
+      padding: 4px 8px;
+      background: #282;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    #authHeader .addPhotoBtn:hover { background: #1a6; }
+    #authHeader a {
+      color: #0066cc;
+      text-decoration: none;
+    }
+    #authHeader a:hover { text-decoration: underline; }
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal.show { display: flex; }
+    .modalContent {
+      background: white;
+      padding: 24px;
+      border-radius: 8px;
+      max-width: 340px;
+      width: 90%;
+    }
+    .modalContent input { width: 100%; padding: 8px 12px; margin: 8px 0; font-size: 16px; }
+    .modalContent button { margin-right: 8px; margin-top: 8px; padding: 8px 16px; cursor: pointer; }
+    h1 { margin-bottom: 8px; }
+    h2 { margin-top: 24px; margin-bottom: 12px; font-size: 1.1em; color: #555; }
+    ul { list-style: none; padding: 0; }
+    ul li { margin: 8px 0; }
+    ul a { color: #0066cc; }
+    ul a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+<div id="authHeader">
+  <div id="loggedOutArea">
+    <a href="/auth.html">Create account / Log in</a>
+  </div>
+  <div id="loggedInArea" style="display: none;">
+    <div class="userArea">
+      <img id="avatarImg" class="avatar" src="" alt="" title="Click to change photo" style="display: none;">
+      <div id="avatarPlaceholder" class="avatar" title="Add profile picture" style="display: none; cursor: pointer; line-height: 36px; text-align: center; font-size: 18px; color: #666;">+</div>
+      <span class="username" id="headerUsername"></span>
+      <button type="button" class="addPhotoBtn" id="addPhotoBtn">Add photo</button>
+      <a href="/auth.html">Log out</a>
+    </div>
+  </div>
+</div>
+
+<div id="modal" class="modal">
+  <div class="modalContent">
+    <h3>Profile picture</h3>
+    <p>Enter image URL (e.g. https://example.com/photo.jpg)</p>
+    <input type="url" id="photoUrlInput" placeholder="https://...">
+    <div>
+      <button type="button" id="savePhotoBtn">Save</button>
+      <button type="button" id="cancelPhotoBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<h1>Colour Wars</h1>
+<h2>Game modes</h2>
+<ul>
+  <li><a href="/Single%20player%20colour%20wars.html">Single Player</a></li>
+  <li><a href="/Single%20player%20colour%20wars%20-%20Hard%20AI.html">Single Player (Hard AI)</a></li>
+  <li><a href="/Two%20player%20colour%20wars.html">Two Player (Local)</a></li>
+  <li><a href="/Four%20player%20colour%20wars.html">Four Player</a></li>
+  <li><a href="/Four%20player%20vs%20AI.html">Four Player vs AI</a></li>
+  <li><strong><a href="/Online%20Multiplayer.html">Online Multiplayer (2 players)</a></strong></li>
+  <li><strong><a href="/Online%20Multiplayer%204%20Player.html">Online Multiplayer (4 players)</a></strong></li>
+</ul>
+
+<script>
+const API = "/api/auth";
+const tokenKey = "colourwars_token";
+
+function getToken() {
+  return localStorage.getItem(tokenKey);
+}
+
+function setToken(t) {
+  if (t) localStorage.setItem(tokenKey, t);
+  else localStorage.removeItem(tokenKey);
+}
+
+function showLoggedIn(user) {
+  document.getElementById("loggedOutArea").style.display = "none";
+  document.getElementById("loggedInArea").style.display = "block";
+  document.getElementById("headerUsername").textContent = user.username;
+  const img = document.getElementById("avatarImg");
+  const placeholder = document.getElementById("avatarPlaceholder");
+  if (user.profile_picture_url) {
+    img.src = user.profile_picture_url;
+    img.style.display = "block";
+    placeholder.style.display = "none";
+    img.onerror = () => {
+      img.style.display = "none";
+      placeholder.style.display = "block";
+    };
+  } else {
+    img.style.display = "none";
+    placeholder.style.display = "block";
+  }
+}
+
+function showLoggedOut() {
+  document.getElementById("loggedOutArea").style.display = "block";
+  document.getElementById("loggedInArea").style.display = "none";
+}
+
+document.getElementById("addPhotoBtn").addEventListener("click", () => {
+  document.getElementById("modal").classList.add("show");
+  document.getElementById("photoUrlInput").value = "";
+  document.getElementById("photoUrlInput").focus();
+});
+
+document.getElementById("avatarImg").addEventListener("click", () => {
+  document.getElementById("addPhotoBtn").click();
+});
+document.getElementById("avatarPlaceholder").addEventListener("click", () => {
+  document.getElementById("addPhotoBtn").click();
+});
+
+document.getElementById("savePhotoBtn").addEventListener("click", async () => {
+  const url = document.getElementById("photoUrlInput").value.trim();
+  const token = getToken();
+  if (!token) return;
+  try {
+    const res = await fetch(API + "/profile", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({ profile_picture_url: url || null }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || "Failed to update");
+      return;
+    }
+    document.getElementById("modal").classList.remove("show");
+    showLoggedIn(data.user);
+  } catch (err) {
+    alert("Network error");
+  }
+});
+
+document.getElementById("cancelPhotoBtn").addEventListener("click", () => {
+  document.getElementById("modal").classList.remove("show");
+});
+document.getElementById("modal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("modal")) {
+    document.getElementById("modal").classList.remove("show");
+  }
+});
+
+if (getToken()) {
+  fetch(API + "/me", { headers: { Authorization: "Bearer " + getToken() } })
+    .then((r) => (r.ok ? r.json() : Promise.reject()))
+    .then((d) => showLoggedIn(d.user))
+    .catch(() => showLoggedOut());
+} else {
+  showLoggedOut();
+}
+</script>
+</body>
+</html>

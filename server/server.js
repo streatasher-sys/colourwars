@@ -433,25 +433,7 @@ app.use(express.static(ROOT));
 app.use("/api/auth", auth.router);
 
 app.get("/", (req, res) => {
-  res.send(`
-<!DOCTYPE html>
-<html>
-<head><title>Colour Wars</title></head>
-<body style="font-family: sans-serif; max-width: 400px; margin: 50px auto; padding: 20px;">
-  <h1>Colour Wars</h1>
-  <p><a href="/auth.html">Create account / Log in</a></p>
-  <h2>Game modes</h2>
-  <ul>
-    <li><a href="/Single%20player%20colour%20wars.html">Single Player</a></li>
-    <li><a href="/Single%20player%20colour%20wars%20-%20Hard%20AI.html">Single Player (Hard AI)</a></li>
-    <li><a href="/Two%20player%20colour%20wars.html">Two Player (Local)</a></li>
-    <li><a href="/Four%20player%20colour%20wars.html">Four Player</a></li>
-    <li><a href="/Four%20player%20vs%20AI.html">Four Player vs AI</a></li>
-    <li><strong><a href="/Online%20Multiplayer.html">Online Multiplayer (2 players)</a></strong></li>
-    <li><strong><a href="/Online%20Multiplayer%204%20Player.html">Online Multiplayer (4 players)</a></strong></li>
-  </ul>
-</body>
-</html>`);
+  res.sendFile(path.join(ROOT, "index.html"));
 });
 
 io.on("connection", (socket) => {

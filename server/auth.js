@@ -111,13 +111,46 @@ router.get("/me", authMiddleware, async (req, res) => {
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
-    res.json({ user: { id: user.id, username: user.username, email: user.email } });
+    res.json({
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        profile_picture_url: user.profile_picture_url || null,
+      },
+    });
   } catch (err) {
     if (err.message && err.message.includes("not configured")) {
       return res.status(503).json({ error: "Account system unavailable" });
     }
     console.error("Me error:", err);
     res.status(500).json({ error: "Failed to fetch user" });
+  }
+});
+
+router.patch("/profile", authMiddleware, express.json(), async (req, res) => {
+  try {
+    const { profile_picture_url } = req.body || {};
+    const url = typeof profile_picture_url === "string" ? profile_picture_url.trim() : null;
+    if (url && url.length > 512) {
+      return res.status(400).json({ error: "URL too long" });
+    }
+    await db.updateProfilePicture(req.userId, url || null);
+    const user = await db.findUserById(req.userId);
+    res.json({
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        profile_picture_url: user.profile_picture_url || null,
+      },
+    });
+  } catch (err) {
+    if (err.message && err.message.includes("not configured")) {
+      return res.status(503).json({ error: "Account system unavailable" });
+    }
+    console.error("Profile update error:", err);
+    res.status(500).json({ error: "Failed to update profile" });
   }
 });
 

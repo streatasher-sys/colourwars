@@ -15,13 +15,15 @@
     .tabs { margin-bottom: 20px; }
     .tabs button { margin-right: 8px; padding: 8px 14px; background: #ddd; color: #333; }
     .tabs button.active { background: #282; color: white; }
-    #logoutDiv { margin-top: 20px; }
-    #logoutDiv button { background: #c22; }
-    #logoutDiv button:hover { background: #a11; }
+  #logoutDiv { margin-top: 20px; }
+  #logoutDiv button { background: #c22; }
+  #logoutDiv button:hover { background: #a11; }
+  .backLink { display: inline-block; margin-top: 16px; color: #0066cc; }
   </style>
 </head>
 <body>
 <h1>Colour Wars — Account</h1>
+<a href="/" class="backLink">← Return to main page</a>
 
 <div id="authForms">
   <div class="tabs">
@@ -57,6 +59,7 @@
 <div id="logoutDiv" style="display: none;">
   <p>Logged in as <strong id="userDisplay"></strong></p>
   <button type="button" id="logoutBtn">Log out</button>
+  <a href="/" class="backLink">← Return to main page</a>
 </div>
 
 <script>
@@ -80,6 +83,7 @@ function showForms(show) {
 function showLoggedIn(username) {
   document.getElementById("userDisplay").textContent = username;
   showForms(false);
+  document.querySelector("#logoutDiv .backLink").style.display = "inline-block";
 }
 
 function showLoggedOut() {
@@ -123,7 +127,7 @@ document.getElementById("register").addEventListener("submit", async (e) => {
       return;
     }
     setToken(data.token);
-    window.location.href = "/";
+    showLoggedIn(data.user.username);
   } catch (err) {
     errEl.textContent = "Network error";
   }
@@ -146,7 +150,7 @@ document.getElementById("login").addEventListener("submit", async (e) => {
       return;
     }
     setToken(data.token);
-    window.location.href = "/";
+    showLoggedIn(data.user.username);
   } catch (err) {
     errEl.textContent = "Network error";
   }
@@ -159,7 +163,7 @@ document.getElementById("logoutBtn").addEventListener("click", () => {
 if (getToken()) {
   fetch(API + "/me", { headers: { Authorization: "Bearer " + getToken() } })
     .then((r) => (r.ok ? r.json() : Promise.reject()))
-    .then(() => { window.location.href = "/"; })
+    .then((d) => showLoggedIn(d.user.username))
     .catch(() => showLoggedOut());
 } else {
   document.getElementById("tabRegister").classList.add("active");

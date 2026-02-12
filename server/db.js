@@ -38,6 +38,7 @@ async function initDb() {
       username VARCHAR(50) UNIQUE NOT NULL,
       email VARCHAR(255) UNIQUE NOT NULL,
       password_hash VARCHAR(255) NOT NULL,
+      profile_picture_url VARCHAR(512),
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
       updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     )
@@ -46,6 +47,11 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
   `);
+  try {
+    await query(`ALTER TABLE users ADD COLUMN profile_picture_url VARCHAR(512)`);
+  } catch (e) {
+    if (e.code !== "42701") throw e;
+  }
 }
 
 async function createUser(username, email, passwordHash) {
@@ -74,10 +80,17 @@ async function findUserByEmail(email) {
 
 async function findUserById(id) {
   const result = await query(
-    `SELECT id, username, email, created_at FROM users WHERE id = $1`,
+    `SELECT id, username, email, profile_picture_url, created_at FROM users WHERE id = $1`,
     [id]
   );
   return result.rows[0];
+}
+
+async function updateProfilePicture(userId, url) {
+  await query(
+    `UPDATE users SET profile_picture_url = $1, updated_at = NOW() WHERE id = $2`,
+    [url || null, userId]
+  );
 }
 
 module.exports = {
@@ -88,4 +101,5 @@ module.exports = {
   findUserByUsername,
   findUserByEmail,
   findUserById,
+  updateProfilePicture,
 };
