@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Colour Wars — Account</title>
+  <style>
+    body { font-family: sans-serif; max-width: 340px; margin: 50px auto; padding: 20px; }
+    h1 { margin-bottom: 20px; }
+    form { margin-bottom: 24px; }
+    label { display: block; margin-bottom: 4px; font-weight: 500; }
+    input { width: 100%; padding: 8px 12px; margin-bottom: 12px; font-size: 16px; box-sizing: border-box; }
+    button { padding: 10px 16px; font-size: 16px; cursor: pointer; background: #282; color: white; border: none; border-radius: 4px; }
+    button:hover { background: #1a6; }
+    .error { color: #c00; margin-bottom: 12px; }
+    .success { color: #282; margin-bottom: 12px; }
+    .tabs { margin-bottom: 20px; }
+    .tabs button { margin-right: 8px; padding: 8px 14px; background: #ddd; color: #333; }
+    .tabs button.active { background: #282; color: white; }
+    #logoutDiv { margin-top: 20px; }
+    #logoutDiv button { background: #c22; }
+    #logoutDiv button:hover { background: #a11; }
+  </style>
+</head>
+<body>
+<h1>Colour Wars — Account</h1>
+
+<div id="authForms">
+  <div class="tabs">
+    <button type="button" id="tabRegister">Register</button>
+    <button type="button" id="tabLogin">Log in</button>
+  </div>
+
+  <div id="registerForm">
+    <form id="register">
+      <label>Username</label>
+      <input type="text" name="username" required minlength="3" maxlength="50" placeholder="3–50 characters">
+      <label>Email</label>
+      <input type="email" name="email" required placeholder="you@example.com">
+      <label>Password</label>
+      <input type="password" name="password" required minlength="6" placeholder="At least 6 characters">
+      <div class="error" id="registerError"></div>
+      <button type="submit">Create account</button>
+    </form>
+  </div>
+
+  <div id="loginForm" style="display: none;">
+    <form id="login">
+      <label>Username</label>
+      <input type="text" name="username" required>
+      <label>Password</label>
+      <input type="password" name="password" required>
+      <div class="error" id="loginError"></div>
+      <button type="submit">Log in</button>
+    </form>
+  </div>
+</div>
+
+<div id="logoutDiv" style="display: none;">
+  <p>Logged in as <strong id="userDisplay"></strong></p>
+  <button type="button" id="logoutBtn">Log out</button>
+</div>
+
+<script>
+const API = "/api/auth";
+const tokenKey = "colourwars_token";
+
+function getToken() {
+  return localStorage.getItem(tokenKey);
+}
+
+function setToken(t) {
+  if (t) localStorage.setItem(tokenKey, t);
+  else localStorage.removeItem(tokenKey);
+}
+
+function showForms(show) {
+  document.getElementById("authForms").style.display = show ? "block" : "none";
+  document.getElementById("logoutDiv").style.display = show ? "none" : "block";
+}
+
+function showLoggedIn(username) {
+  document.getElementById("userDisplay").textContent = username;
+  showForms(false);
+}
+
+function showLoggedOut() {
+  setToken(null);
+  showForms(true);
+}
+
+document.getElementById("tabRegister").addEventListener("click", () => {
+  document.getElementById("registerForm").style.display = "block";
+  document.getElementById("loginForm").style.display = "none";
+  document.getElementById("tabRegister").classList.add("active");
+  document.getElementById("tabLogin").classList.remove("active");
+  document.getElementById("registerError").textContent = "";
+  document.getElementById("loginError").textContent = "";
+});
+
+document.getElementById("tabLogin").addEventListener("click", () => {
+  document.getElementById("registerForm").style.display = "none";
+  document.getElementById("loginForm").style.display = "block";
+  document.getElementById("tabLogin").classList.add("active");
+  document.getElementById("tabRegister").classList.remove("active");
+  document.getElementById("registerError").textContent = "";
+  document.getElementById("loginError").textContent = "";
+});
+
+document.getElementById("register").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const errEl = document.getElementById("registerError");
+  errEl.textContent = "";
+  const form = e.target;
+  const body = JSON.stringify({
+    username: form.username.value.trim(),
+    email: form.email.value.trim(),
+    password: form.password.value,
+  });
+  try {
+    const res = await fetch(API + "/register", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    const data = await res.json();
+    if (!res.ok) {
+      errEl.textContent = data.error || "Registration failed";
+      return;
+    }
+    setToken(data.token);
+    showLoggedIn(data.user.username);
+  } catch (err) {
+    errEl.textContent = "Network error";
+  }
+});
+
+document.getElementById("login").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const errEl = document.getElementById("loginError");
+  errEl.textContent = "";
+  const form = e.target;
+  const body = JSON.stringify({
+    username: form.username.value.trim(),
+    password: form.password.value,
+  });
+  try {
+    const res = await fetch(API + "/login", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    const data = await res.json();
+    if (!res.ok) {
+      errEl.textContent = data.error || "Login failed";
+      return;
+    }
+    setToken(data.token);
+    showLoggedIn(data.user.username);
+  } catch (err) {
+    errEl.textContent = "Network error";
+  }
+});
+
+document.getElementById("logoutBtn").addEventListener("click", () => {
+  showLoggedOut();
+});
+
+if (getToken()) {
+  fetch(API + "/me", { headers: { Authorization: "Bearer " + getToken() } })
+    .then((r) => (r.ok ? r.json() : Promise.reject()))
+    .then((d) => showLoggedIn(d.user.username))
+    .catch(() => showLoggedOut());
+} else {
+  document.getElementById("tabRegister").classList.add("active");
+}
+</script>
+</body>
+</html>

@@ -9,9 +9,12 @@
     #gameArea { display: none; }
     canvas { border: 2px solid black; display: block; }
     #turnIndicator { margin-bottom: 10px; font-size: 18px; font-weight: bold; min-height: 1.5em; }
-    #roomCode { margin-bottom: 8px; font-size: 14px; color: #666; }
+    #roomCode { margin-bottom: 8px; font-size: 14px; color: #282; }
     #roomCode span { font-weight: bold; letter-spacing: 2px; }
-    #playerCount { margin-bottom: 6px; font-size: 14px; color: #444; }
+    #playerInfo { margin-bottom: 6px; font-size: 14px; }
+    #playerCount { margin-bottom: 6px; font-size: 14px; color: #282; }
+    #timerBar { margin-bottom: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    #timerBar .timer { font-size: 14px; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -23,7 +26,7 @@
     <span id="matchmakingText">Searching for players...</span>
     <button id="cancelMatchBtn" style="margin-left: 12px;">Cancel</button>
   </div>
-  <p style="margin-top: 16px; font-size: 14px; color: #666;">— or —</p>
+  <p style="margin-top: 16px; font-size: 14px; color: #282;">— or —</p>
   <button id="createBtn">Create Private Game</button>
   <div style="margin-top: 16px;">
     <input type="text" id="joinInput" placeholder="Room code" maxlength="6" style="text-transform: uppercase;">
@@ -35,8 +38,15 @@
 
 <div id="gameArea">
   <div id="roomCode">Room: <span id="roomCodeVal"></span></div>
+  <div id="playerInfo">You control: <span id="myColour"></span></div>
   <div id="playerCount"></div>
   <div id="turnIndicator">Red's turn</div>
+  <div id="timerBar">
+    <span class="timer" id="redTimer" style="color: #c22;">5:00</span>
+    <span class="timer" id="greenTimer" style="color: #282;">5:00</span>
+    <span class="timer" id="blueTimer" style="color: #26a;">5:00</span>
+    <span class="timer" id="yellowTimer" style="color: #da4;">5:00</span>
+  </div>
   <canvas id="boardCanvas" width="350" height="350"></canvas>
 </div>
 
@@ -68,7 +78,7 @@ if (typeof io === "undefined") {
   const cols = 7;
   const cellSize = 50;
   const red = 1;
-  const green = 2;
+  const green = -1;
   const blue = 3;
   const yellow = 4;
   const PLAYERS = [red, green, blue, yellow];
@@ -82,6 +92,11 @@ if (typeof io === "undefined") {
   let winner = 0;
   let gameEnded = false;
   let playerCount = 0;
+  let playerTimeRemaining = null;
+  let playerIsAI = null;
+  let turnStartTime = 0;
+  let playersReady = false;
+  let timerInterval = null;
   const canvas = document.getElementById("boardCanvas");
   const ctx = canvas.getContext("2d");
 
@@ -92,6 +107,7 @@ if (typeof io === "undefined") {
     document.getElementById("joinBtn").disabled = false;
     document.getElementById("findMatchBtn").disabled = false;
     document.getElementById("matchmakingStatus").style.display = "none";
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
   }
 
   function showGame() {
@@ -100,6 +116,7 @@ if (typeof io === "undefined") {
     document.getElementById("matchmakingStatus").style.display = "none";
     document.getElementById("roomCodeVal").textContent = roomCode;
     updatePlayerCount();
+    updatePlayerInfo();
   }
 
   function updatePlayerCount() {
@@ -121,7 +138,7 @@ if (typeof io === "undefined") {
         ctx.strokeRect(c * cellSize, r * cellSize, cellSize, cellSize);
         const cell = board[r][c];
         if (cell.count > 0) {
-          ctx.fillStyle = PLAYER_COLORS[cell.owner] || "gray";
+          ctx.fillStyle = PLAYER_COLORS[cell.owner] || "#282";
           const radius = 10 + 5 * (cell.count - 1);
           ctx.beginPath();
           ctx.arc(c * cellSize + cellSize / 2, r * cellSize + cellSize / 2, radius, 0, 2 * Math.PI);
@@ -142,6 +159,14 @@ if (typeof io === "undefined") {
     }
   }
 
+  function updatePlayerInfo() {
+    const el = document.getElementById("myColour");
+    if (el && myPlayer) {
+      el.textContent = PLAYER_NAMES[myPlayer];
+      el.style.color = PLAYER_COLORS[myPlayer] || "#282";
+    }
+  }
+
   function updateTurnIndicator() {
     const turnEl = document.getElementById("turnIndicator");
     if (winner !== 0) {
@@ -150,8 +175,39 @@ if (typeof io === "undefined") {
       return;
     }
     const current = PLAYERS[currentPlayerIndex];
-    turnEl.textContent = PLAYER_NAMES[current] + "'s turn";
+    const isMyTurn = current === myPlayer;
+    const cpIsAI = (playerIsAI && playerIsAI[current]) || false;
+    if (isMyTurn) {
+      turnEl.textContent = "Your turn (" + PLAYER_NAMES[current] + ")";
+    } else {
+      turnEl.textContent = (cpIsAI ? "AI" : "Opponent") + "'s turn (" + PLAYER_NAMES[current] + ")";
+    }
     turnEl.style.color = PLAYER_COLORS[current] || "";
+  }
+
+  function formatTime(sec) {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return m + ":" + (s < 10 ? "0" : "") + s;
+  }
+
+  function updateTimerDisplay() {
+    if (!board || gameEnded) return;
+    const ids = ["redTimer", "greenTimer", "blueTimer", "yellowTimer"];
+    const pids = [red, green, blue, yellow];
+    for (let i = 0; i < 4; i++) {
+      let display = (playerTimeRemaining && playerTimeRemaining[pids[i]]) ?? 300;
+      if (playerTimeRemaining && turnStartTime) {
+        const now = Date.now() / 1000;
+        const elapsed = now - (turnStartTime / 1000);
+        const cp = PLAYERS[currentPlayerIndex];
+        if (cp === pids[i] && (!playerIsAI || !playerIsAI[cp])) {
+          display = Math.max(0, display - elapsed);
+        }
+      }
+      const el = document.getElementById(ids[i]);
+      if (el) el.textContent = PLAYER_NAMES[pids[i]] + ": " + formatTime(display);
+    }
   }
 
   canvas.addEventListener("click", (e) => {
@@ -213,10 +269,31 @@ if (typeof io === "undefined") {
     currentPlayerIndex = state.currentPlayerIndex ?? 0;
     winner = state.winner || 0;
     gameEnded = winner !== 0;
+    playerTimeRemaining = state.playerTimeRemaining || null;
+    playerIsAI = state.playerIsAI || null;
+    turnStartTime = state.turnStartTime ?? Date.now();
+    playersReady = state.playersReady || false;
     drawBoard();
+    updatePlayerInfo();
     updateTurnIndicator();
+    updateTimerDisplay();
+    if (!timerInterval && !gameEnded) {
+      timerInterval = setInterval(updateTimerDisplay, 200);
+    }
     if (gameEnded) {
+      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
       setTimeout(() => alert(PLAYER_NAMES[winner] + " wins!"), 100);
+    }
+  });
+
+  socket.on("playerTimedOut", (data) => {
+    const p = data.player;
+    if (!playerIsAI) playerIsAI = {};
+    playerIsAI[p] = true;
+    if (p === myPlayer) {
+      alert("You ran out of time! AI is now playing for you.");
+    } else {
+      alert(PLAYER_NAMES[p] + " ran out of time. AI has taken over.");
     }
   });
 

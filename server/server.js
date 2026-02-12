@@ -1,7 +1,10 @@
+require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const path = require("path");
 const { Server } = require("socket.io");
+const auth = require("./auth");
+const db = require("./db");
 
 const PORT = process.env.PORT || 3000;
 const ROOT = path.join(__dirname, "..");
@@ -156,6 +159,99 @@ function nextPlayerIndex4(room) {
   return (room.currentPlayerIndex + 1) % 4;
 }
 
+// --- 4-player AI (simple heuristic) ---
+function getAIMove4(board, player) {
+  const moves = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (board[r][c].owner === player) moves.push([r, c]);
+    }
+  }
+  if (moves.length === 0) return null;
+  const opponents = PLAYERS_4.filter((p) => p !== player);
+  let best = moves[0];
+  let bestScore = -1;
+  for (const [r, c] of moves) {
+    let s = board[r][c].count * 4 + (board[r][c].count === 3 ? 8 : 0);
+    for (const opp of opponents) {
+      if (r > 0 && board[r - 1][c].owner === opp) s += 6;
+      if (r < ROWS - 1 && board[r + 1][c].owner === opp) s += 6;
+      if (c > 0 && board[r][c - 1].owner === opp) s += 6;
+      if (c < COLS - 1 && board[r][c + 1].owner === opp) s += 6;
+    }
+    if (s > bestScore) { bestScore = s; best = [r, c]; }
+  }
+  return best;
+}
+
+function getGameState4(room) {
+  return {
+    board: JSON.parse(JSON.stringify(room.board)),
+    currentPlayerIndex: room.currentPlayerIndex ?? 0,
+    winner: room.winner || 0,
+    playerTimeRemaining: room.playerTimeRemaining ? { ...room.playerTimeRemaining } : null,
+    playerIsAI: room.playerIsAI ? { ...room.playerIsAI } : null,
+    turnStartTime: room.turnStartTime ?? Date.now(),
+    playersReady: room.playersReady || false,
+    mode: "4player",
+  };
+}
+
+function scheduleTurnTimeout4(io, roomCode, room) {
+  if (room.turnTimeoutId) clearTimeout(room.turnTimeoutId);
+  const cp = PLAYERS_4[room.currentPlayerIndex];
+  const slot = room.currentPlayerIndex + 1;
+  const timeRemaining = (room.playerTimeRemaining && room.playerTimeRemaining[cp]) ?? TURN_TIME_SEC;
+  const isAI = room.playerIsAI && room.playerIsAI[cp];
+  if (room.winner || timeRemaining <= 0) return;
+  if (isAI) {
+    room.turnTimeoutId = setTimeout(() => runAITurn4(io, roomCode, room), 400);
+  } else {
+    room.turnTimeoutId = setTimeout(() => onTimeExpired4(io, roomCode, room), timeRemaining * 1000);
+  }
+}
+
+function onTimeExpired4(io, roomCode, room) {
+  if (!room || room.winner) return;
+  room.turnTimeoutId = null;
+  const cp = PLAYERS_4[room.currentPlayerIndex];
+  if (!room.playerIsAI) room.playerIsAI = {};
+  room.playerIsAI[cp] = true;
+  if (room.playerTimeRemaining) room.playerTimeRemaining[cp] = 0;
+  io.to(roomCode).emit("playerTimedOut", { player: cp });
+  runAITurn4(io, roomCode, room);
+}
+
+function runAITurn4(io, roomCode, room) {
+  if (!room || room.winner) return;
+  room.turnTimeoutId = null;
+  const cp = PLAYERS_4[room.currentPlayerIndex];
+  const isAI = room.playerIsAI && room.playerIsAI[cp];
+  if (!isAI) return;
+  const move = getAIMove4(room.board, cp);
+  if (!move) {
+    room.currentPlayerIndex = nextPlayerIndex4(room);
+    room.turnStartTime = Date.now();
+    scheduleTurnTimeout4(io, roomCode, room);
+    io.to(roomCode).emit("gameState", getGameState4(room));
+    return;
+  }
+  const [row, col] = move;
+  makeMove(room.board, row, col, cp);
+  const winner = resolve(room.board, cp, () => gameOver4(room.board)) || gameOver4(room.board);
+  if (winner !== 0) {
+    room.winner = winner;
+    if (room.turnTimeoutId) clearTimeout(room.turnTimeoutId);
+    room.turnTimeoutId = null;
+  } else {
+    room.currentPlayerIndex = nextPlayerIndex4(room);
+    room.turnStartTime = Date.now();
+    scheduleTurnTimeout4(io, roomCode, room);
+  }
+  io.to(roomCode).emit("gameState", getGameState4(room));
+  if (winner !== 0) setTimeout(() => rooms.delete(roomCode), 5000);
+}
+
 function getPlayerId4(room, socketId) {
   for (let i = 1; i <= 4; i++) {
     if (room.players[i] === socketId) return PLAYERS_4[i - 1];
@@ -193,6 +289,11 @@ function matchFourPlayers(io) {
     board,
     currentPlayerIndex: 0,
     players: { 1: ids[0], 2: ids[1], 3: ids[2], 4: ids[3] },
+    playerTimeRemaining: { [RED]: TURN_TIME_SEC, [GREEN]: TURN_TIME_SEC, [BLUE]: TURN_TIME_SEC, [YELLOW]: TURN_TIME_SEC },
+    playerIsAI: {},
+    turnStartTime: Date.now(),
+    turnTimeoutId: null,
+    playersReady: true,
   };
   rooms.set(code, room);
   for (let i = 0; i < 4; i++) {
@@ -200,14 +301,10 @@ function matchFourPlayers(io) {
     if (sock) {
       sock.join(code);
       sock.emit("matched", { code, player: PLAYERS_4[i], mode: "4player" });
-      sock.emit("gameState", {
-        board: JSON.parse(JSON.stringify(room.board)),
-        currentPlayerIndex: 0,
-        winner: 0,
-        mode: "4player",
-      });
+      sock.emit("gameState", getGameState4(room));
     }
   }
+  scheduleTurnTimeout4(io, code, room);
   io.to(code).emit("playerJoined", { count: 4, player: null });
 }
 function getGameState2(room) {
@@ -330,7 +427,10 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+app.use(express.json());
 app.use(express.static(ROOT));
+
+app.use("/api/auth", auth.router);
 
 app.get("/", (req, res) => {
   res.send(`
@@ -339,6 +439,8 @@ app.get("/", (req, res) => {
 <head><title>Colour Wars</title></head>
 <body style="font-family: sans-serif; max-width: 400px; margin: 50px auto; padding: 20px;">
   <h1>Colour Wars</h1>
+  <p><a href="/auth.html">Create account / Log in</a></p>
+  <h2>Game modes</h2>
   <ul>
     <li><a href="/Single%20player%20colour%20wars.html">Single Player</a></li>
     <li><a href="/Single%20player%20colour%20wars%20-%20Hard%20AI.html">Single Player (Hard AI)</a></li>
@@ -377,6 +479,7 @@ io.on("connection", (socket) => {
     socket.join(code);
     socket.emit("roomCreated", { code, player: RED });
     emitGameState2(io, code, room);
+    scheduleTurnTimeout(io, code, room);
   });
 
   socket.on("findMatch", () => {
@@ -439,21 +542,23 @@ io.on("connection", (socket) => {
     while (rooms.has(code)) code = randomCode();
 
     const board = createBoard4();
-    rooms.set(code, {
+    const room = {
       mode: "4player",
       board,
       currentPlayerIndex: 0,
       players: { 1: socket.id, 2: null, 3: null, 4: null },
-    });
+      playerTimeRemaining: { [RED]: TURN_TIME_SEC, [GREEN]: TURN_TIME_SEC, [BLUE]: TURN_TIME_SEC, [YELLOW]: TURN_TIME_SEC },
+      playerIsAI: {},
+      turnStartTime: Date.now(),
+      turnTimeoutId: null,
+      playersReady: false,
+    };
+    rooms.set(code, room);
 
     socket.join(code);
     socket.emit("roomCreated", { code, player: RED, mode: "4player" });
-    socket.emit("gameState", {
-      board: JSON.parse(JSON.stringify(board)),
-      currentPlayerIndex: 0,
-      winner: 0,
-      mode: "4player",
-    });
+    socket.emit("gameState", getGameState4(room));
+    scheduleTurnTimeout4(io, code, room);
   });
 
   socket.on("joinRoom4", (code) => {
@@ -468,12 +573,7 @@ io.on("connection", (socket) => {
     if (slot !== undefined && slot !== null) {
       const playerId = PLAYERS_4[slot - 1];
       socket.emit("joinedRoom", { code: roomCode, player: playerId, mode: "4player" });
-      socket.emit("gameState", {
-        board: JSON.parse(JSON.stringify(room.board)),
-        currentPlayerIndex: room.currentPlayerIndex,
-        winner: room.winner || 0,
-        mode: "4player",
-      });
+      socket.emit("gameState", getGameState4(room));
       return;
     }
 
@@ -485,16 +585,18 @@ io.on("connection", (socket) => {
 
     const playerId = PLAYERS_4[firstFree - 1];
     room.players[firstFree] = socket.id;
+    const count = [1, 2, 3, 4].filter((i) => room.players[i]).length;
+    room.playersReady = count >= 2;
+    if (!room.playerTimeRemaining) {
+      room.playerTimeRemaining = { [RED]: TURN_TIME_SEC, [GREEN]: TURN_TIME_SEC, [BLUE]: TURN_TIME_SEC, [YELLOW]: TURN_TIME_SEC };
+    }
+    if (!room.playerIsAI) room.playerIsAI = {};
+    if (!room.turnStartTime) room.turnStartTime = Date.now();
+
     socket.join(roomCode);
     socket.emit("joinedRoom", { code: roomCode, player: playerId, mode: "4player" });
-    socket.emit("gameState", {
-      board: JSON.parse(JSON.stringify(room.board)),
-      currentPlayerIndex: room.currentPlayerIndex,
-      winner: 0,
-      mode: "4player",
-    });
+    socket.emit("gameState", getGameState4(room));
 
-    const count = [1, 2, 3, 4].filter((i) => room.players[i]).length;
     io.to(roomCode).emit("playerJoined", { count, player: playerId });
   });
 
@@ -507,6 +609,25 @@ io.on("connection", (socket) => {
       const player = getPlayerId4(room, socket.id);
       if (player === null) return;
       if (PLAYERS_4[room.currentPlayerIndex] !== player) return;
+      if (room.playerIsAI && room.playerIsAI[player]) return;
+
+      if (room.turnTimeoutId) {
+        clearTimeout(room.turnTimeoutId);
+        room.turnTimeoutId = null;
+      }
+      const now = Date.now();
+      const elapsed = (now - room.turnStartTime) / 1000;
+      if (!room.playerTimeRemaining) room.playerTimeRemaining = { [RED]: TURN_TIME_SEC, [GREEN]: TURN_TIME_SEC, [BLUE]: TURN_TIME_SEC, [YELLOW]: TURN_TIME_SEC };
+      const timeRemaining = Math.max(0, (room.playerTimeRemaining[player] ?? TURN_TIME_SEC) - elapsed);
+      room.playerTimeRemaining[player] = timeRemaining;
+
+      if (timeRemaining <= 0) {
+        if (!room.playerIsAI) room.playerIsAI = {};
+        room.playerIsAI[player] = true;
+        io.to(roomCode).emit("playerTimedOut", { player });
+        runAITurn4(io, roomCode, room);
+        return;
+      }
 
       if (!makeMove(room.board, row, col, player)) return;
 
@@ -514,17 +635,15 @@ io.on("connection", (socket) => {
 
       if (winner !== 0) {
         room.winner = winner;
+        if (room.turnTimeoutId) clearTimeout(room.turnTimeoutId);
+        room.turnTimeoutId = null;
       } else {
         room.currentPlayerIndex = nextPlayerIndex4(room);
+        room.turnStartTime = Date.now();
+        scheduleTurnTimeout4(io, roomCode, room);
       }
 
-      const state = {
-        board: JSON.parse(JSON.stringify(room.board)),
-        currentPlayerIndex: room.currentPlayerIndex,
-        winner: winner || 0,
-        mode: "4player",
-      };
-      io.to(roomCode).emit("gameState", state);
+      io.to(roomCode).emit("gameState", getGameState4(room));
 
       if (winner !== 0) {
         setTimeout(() => rooms.delete(roomCode), 5000);
@@ -601,7 +720,25 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-  console.log("Open in browser to play Colour Wars!");
+async function start() {
+  if (process.env.DATABASE_URL) {
+    try {
+      await db.initDb();
+      console.log("Database initialized (PostgreSQL)");
+    } catch (err) {
+      console.error("Database init failed:", err.message);
+      console.warn("Account system may not work. Set DATABASE_URL in .env");
+    }
+  } else {
+    console.warn("DATABASE_URL not set - account system disabled. Copy .env.example to .env");
+  }
+  server.listen(PORT, () => {
+    console.log(`Server running at http://localhost:${PORT}`);
+    console.log("Open in browser to play Colour Wars!");
+    console.log("Auth API: POST /api/auth/register, POST /api/auth/login, GET /api/auth/me");
+  });
+}
+start().catch((err) => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
 });
