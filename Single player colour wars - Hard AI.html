@@ -133,6 +133,7 @@ const movesBuf = new Int8Array(98);
 let movesCount = 0;
 
 function criticalMass() { return 4; }
+const MAX_ORBS = 8;
 
 // --- Game logic (typed-array + optional diff recording) ---
 function makeMove(b, row, col, player) {
@@ -161,7 +162,7 @@ function explode(b, row, col, player) {
     const r2 = NEIGHBORS_Out[k * 2], c2 = NEIGHBORS_Out[k * 2 + 1];
     const j = idx(r2, c2);
     recordCell(b, j);
-    b.count[j] += orbsPerNeighbor;
+    b.count[j] = Math.min(MAX_ORBS, b.count[j] + orbsPerNeighbor);
     b.owner[j] = player;
   }
 }
@@ -175,8 +176,11 @@ function resolve(b, player) {
         if (isUnstable(b, r, c)) {
           explode(b, r, c, player);
           changed = true;
+          const w = gameOver();
+          if (w !== 0) return w;
         }
   }
+  return 0;
 }
 
 function resolveOneStep(b, player) {
@@ -198,6 +202,11 @@ function animationTick() {
   const s = animationState;
   s.steps++;
   if (!resolveOneStep(s.board, s.player)) {
+    s.onDone();
+    animationState = null;
+    return;
+  }
+  if (gameOver() !== 0) {
     s.onDone();
     animationState = null;
     return;

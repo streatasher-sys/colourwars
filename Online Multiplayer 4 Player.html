@@ -17,8 +17,14 @@
 <body>
 <div id="lobby">
   <h1>Colour Wars — Online 4 Player</h1>
-  <p>Create a game and share the room code. Up to 4 players (Red, Green, Blue, Yellow).</p>
-  <button id="createBtn">Create Game</button>
+  <p>Find a game or create one and share the room code. Up to 4 players (Red, Green, Blue, Yellow).</p>
+  <button id="findMatchBtn">Find Game</button>
+  <div id="matchmakingStatus" style="display: none; margin-top: 10px;">
+    <span id="matchmakingText">Searching for players...</span>
+    <button id="cancelMatchBtn" style="margin-left: 12px;">Cancel</button>
+  </div>
+  <p style="margin-top: 16px; font-size: 14px; color: #666;">— or —</p>
+  <button id="createBtn">Create Private Game</button>
   <div style="margin-top: 16px;">
     <input type="text" id="joinInput" placeholder="Room code" maxlength="6" style="text-transform: uppercase;">
     <button id="joinBtn">Join Game</button>
@@ -40,6 +46,7 @@ if (typeof io === "undefined") {
   document.getElementById("lobbyMsg").textContent = "Cannot connect. Open this page via http://localhost:3000 (start the server with: npm start)";
   document.getElementById("createBtn").disabled = true;
   document.getElementById("joinBtn").disabled = true;
+  document.getElementById("findMatchBtn").disabled = true;
 } else {
   const socket = io();
   const statusEl = document.getElementById("connectionStatus");
@@ -83,11 +90,14 @@ if (typeof io === "undefined") {
     document.getElementById("gameArea").style.display = "none";
     document.getElementById("lobbyMsg").textContent = msg || "";
     document.getElementById("joinBtn").disabled = false;
+    document.getElementById("findMatchBtn").disabled = false;
+    document.getElementById("matchmakingStatus").style.display = "none";
   }
 
   function showGame() {
     document.getElementById("lobby").style.display = "none";
     document.getElementById("gameArea").style.display = "block";
+    document.getElementById("matchmakingStatus").style.display = "none";
     document.getElementById("roomCodeVal").textContent = roomCode;
     updatePlayerCount();
   }
@@ -172,6 +182,27 @@ if (typeof io === "undefined") {
     showGame();
   });
 
+  socket.on("matched", (data) => {
+    roomCode = data.code;
+    myPlayer = data.player;
+    playerCount = 4;
+    showGame();
+  });
+
+  socket.on("matchmakingStatus", (data) => {
+    if (data.mode !== "4player") return;
+    if (data.searching) {
+      document.getElementById("findMatchBtn").disabled = true;
+      document.getElementById("matchmakingStatus").style.display = "block";
+      document.getElementById("matchmakingText").textContent = "Searching for players... (" + (data.position || "?") + "/4)";
+      document.getElementById("lobbyMsg").textContent = "";
+    } else {
+      document.getElementById("findMatchBtn").disabled = false;
+      document.getElementById("matchmakingStatus").style.display = "none";
+      document.getElementById("lobbyMsg").textContent = "";
+    }
+  });
+
   socket.on("joinError", (msg) => {
     document.getElementById("joinBtn").disabled = false;
     document.getElementById("lobbyMsg").textContent = msg;
@@ -202,6 +233,15 @@ if (typeof io === "undefined") {
     roomCode = null;
     board = null;
     showLobby("Someone disconnected. Create or join a new game.");
+  });
+
+  document.getElementById("findMatchBtn").addEventListener("click", () => {
+    document.getElementById("lobbyMsg").textContent = "";
+    socket.emit("findMatch4");
+  });
+
+  document.getElementById("cancelMatchBtn").addEventListener("click", () => {
+    socket.emit("cancelMatchmaking4");
   });
 
   document.getElementById("createBtn").addEventListener("click", () => {

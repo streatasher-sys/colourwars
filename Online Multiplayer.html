@@ -9,15 +9,24 @@
     #gameArea { display: none; }
     canvas { border: 2px solid black; display: block; }
     #turnIndicator { margin-bottom: 10px; font-size: 18px; font-weight: bold; min-height: 1.5em; }
-    #roomCode { margin-bottom: 8px; font-size: 14px; color: #666; }
+    #roomCode { margin-bottom: 8px; font-size: 14px; color: #282; }
     #roomCode span { font-weight: bold; letter-spacing: 2px; }
+    #playerInfo { margin-bottom: 6px; font-size: 14px; }
+    #timerBar { margin-bottom: 8px; display: flex; gap: 12px; align-items: center; }
+    #timerBar .timer { font-size: 16px; font-weight: bold; }
   </style>
 </head>
 <body>
 <div id="lobby">
   <h1>Colour Wars — Online</h1>
-  <p>Play against a friend! Share your screen or send them the room code.</p>
-  <button id="createBtn">Create Game</button>
+  <p>Find a random opponent or play with a friend using a room code.</p>
+  <button id="findMatchBtn">Find Game</button>
+  <div id="matchmakingStatus" style="display: none; margin-top: 10px;">
+    <span id="matchmakingText">Searching for opponent...</span>
+    <button id="cancelMatchBtn" style="margin-left: 12px;">Cancel</button>
+  </div>
+  <p style="margin-top: 16px; font-size: 14px; color: #282;">— or —</p>
+  <button id="createBtn">Create Private Game</button>
   <div style="margin-top: 16px;">
     <input type="text" id="joinInput" placeholder="Room code" maxlength="6" style="text-transform: uppercase;">
     <button id="joinBtn">Join Game</button>
@@ -28,7 +37,12 @@
 
 <div id="gameArea">
   <div id="roomCode">Room: <span id="roomCodeVal"></span></div>
+  <div id="playerInfo">You control: <span id="myColour"></span></div>
   <div id="turnIndicator">Red's turn</div>
+  <div id="timerBar">
+    <span class="timer" id="redTimer" style="color: #c22;">5:00</span>
+    <span class="timer" id="greenTimer" style="color: #282;">5:00</span>
+  </div>
   <canvas id="boardCanvas" width="350" height="350"></canvas>
 </div>
 
@@ -38,6 +52,7 @@ if (typeof io === "undefined") {
   document.getElementById("lobbyMsg").textContent = "Cannot connect. Open this page via http://localhost:3000 (start the server with: npm start)";
   document.getElementById("createBtn").disabled = true;
   document.getElementById("joinBtn").disabled = true;
+  document.getElementById("findMatchBtn").disabled = true;
 } else {
   const socket = io();
   const statusEl = document.getElementById("connectionStatus");
@@ -68,6 +83,13 @@ let roomCode = null;
 let currentPlayer = red;
 let winner = 0;
 let gameEnded = false;
+let redTimeRemaining = 300;
+let greenTimeRemaining = 300;
+let turnStartTime = 0;
+let redIsAI = false;
+let greenIsAI = false;
+let playersReady = false;
+let timerInterval = null;
 const canvas = document.getElementById("boardCanvas");
 const ctx = canvas.getContext("2d");
 
@@ -76,12 +98,16 @@ function showLobby(msg) {
   document.getElementById("gameArea").style.display = "none";
   document.getElementById("lobbyMsg").textContent = msg || "";
   document.getElementById("joinBtn").disabled = false;
+  document.getElementById("findMatchBtn").disabled = false;
+  document.getElementById("matchmakingStatus").style.display = "none";
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
 }
 
-function showGame() {
+function showGame(showRoomCode) {
   document.getElementById("lobby").style.display = "none";
   document.getElementById("gameArea").style.display = "block";
-  document.getElementById("roomCodeVal").textContent = roomCode;
+  document.getElementById("matchmakingStatus").style.display = "none";
+  document.getElementById("roomCodeVal").textContent = roomCode + (showRoomCode ? " (2 players)" : "");
 }
 
 function isUnstable(board, row, col) {
@@ -118,20 +144,58 @@ function drawBoard() {
   }
 }
 
+function formatTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return m + ":" + (s < 10 ? "0" : "") + s;
+}
+
 function updateTurnIndicator() {
   const turnEl = document.getElementById("turnIndicator");
+  const myColEl = document.getElementById("myColour");
+  if (myColEl) {
+    myColEl.textContent = PLAYER_NAMES[myPlayer];
+    myColEl.style.color = PLAYER_COLORS[myPlayer];
+  }
   if (winner !== 0) {
     turnEl.textContent = PLAYER_NAMES[winner] + " wins!";
     turnEl.style.color = PLAYER_COLORS[winner];
     return;
   }
-  turnEl.textContent = PLAYER_NAMES[currentPlayer] + "'s turn";
+  if (!playersReady) {
+    turnEl.textContent = "Waiting for opponent to join...";
+    turnEl.style.color = "";
+    return;
+  }
+  const isMyTurn = currentPlayer === myPlayer;
+  const cpName = PLAYER_NAMES[currentPlayer];
+  const cpIsAI = (currentPlayer === red && redIsAI) || (currentPlayer === green && greenIsAI);
+  if (isMyTurn) {
+    turnEl.textContent = "Your turn (" + cpName + ")";
+  } else {
+    turnEl.textContent = (cpIsAI ? "AI" : "Opponent") + "'s turn (" + cpName + ")";
+  }
   turnEl.style.color = PLAYER_COLORS[currentPlayer] || "";
+}
+
+function updateTimerDisplay() {
+  if (!board || gameEnded) return;
+  let redDisplay = redTimeRemaining;
+  let greenDisplay = greenTimeRemaining;
+  if (playersReady) {
+    const now = Date.now() / 1000;
+    const elapsed = now - (turnStartTime / 1000);
+    if (currentPlayer === red && !redIsAI) redDisplay = Math.max(0, redTimeRemaining - elapsed);
+    else if (currentPlayer === green && !greenIsAI) greenDisplay = Math.max(0, greenTimeRemaining - elapsed);
+  }
+  document.getElementById("redTimer").textContent = "Red: " + formatTime(redDisplay);
+  document.getElementById("greenTimer").textContent = "Green: " + formatTime(greenDisplay);
 }
 
 canvas.addEventListener("click", (e) => {
   if (!board || gameEnded || winner !== 0) return;
   if (currentPlayer !== myPlayer) return;
+  if ((currentPlayer === red && redIsAI) || (currentPlayer === green && greenIsAI)) return;
 
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
@@ -147,13 +211,32 @@ canvas.addEventListener("click", (e) => {
 socket.on("roomCreated", (data) => {
   roomCode = data.code;
   myPlayer = data.player;
-  showGame();
+  showGame(false);
 });
 
 socket.on("joinedRoom", (data) => {
   roomCode = data.code;
   myPlayer = data.player;
-  showGame();
+  showGame(true);
+});
+
+socket.on("matched", (data) => {
+  roomCode = data.code;
+  myPlayer = data.player;
+  showGame(false);
+});
+
+socket.on("matchmakingStatus", (data) => {
+  if (data.searching) {
+    document.getElementById("findMatchBtn").disabled = true;
+    document.getElementById("matchmakingStatus").style.display = "block";
+    document.getElementById("matchmakingText").textContent = "Searching for opponent... (queue: " + (data.position || "?") + ")";
+    document.getElementById("lobbyMsg").textContent = "";
+  } else {
+    document.getElementById("findMatchBtn").disabled = false;
+    document.getElementById("matchmakingStatus").style.display = "none";
+    document.getElementById("lobbyMsg").textContent = "";
+  }
 });
 
 socket.on("joinError", (msg) => {
@@ -166,15 +249,38 @@ socket.on("gameState", (state) => {
   currentPlayer = state.currentPlayer;
   winner = state.winner || 0;
   gameEnded = winner !== 0;
+  redTimeRemaining = state.redTimeRemaining ?? 300;
+  greenTimeRemaining = state.greenTimeRemaining ?? 300;
+  turnStartTime = state.turnStartTime ?? Date.now();
+  redIsAI = state.redIsAI || false;
+  greenIsAI = state.greenIsAI || false;
+  playersReady = state.playersReady || false;
   drawBoard();
   updateTurnIndicator();
+  updateTimerDisplay();
+  if (!timerInterval && !gameEnded) {
+    timerInterval = setInterval(updateTimerDisplay, 200);
+  }
   if (gameEnded) {
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
     setTimeout(() => alert(PLAYER_NAMES[winner] + " wins!"), 100);
   }
 });
 
+socket.on("playerTimedOut", (data) => {
+  const p = data.player;
+  if (p === red) redIsAI = true;
+  else greenIsAI = true;
+  if (p === myPlayer) {
+    alert("You ran out of time! AI is now playing for you.");
+  } else {
+    alert("Opponent ran out of time. AI has taken over.");
+  }
+});
+
 socket.on("playerJoined", () => {
-  document.getElementById("roomCodeVal").textContent = roomCode + " (2 players)";
+  const el = document.getElementById("roomCodeVal");
+  if (el) el.textContent = roomCode + " (2 players)";
 });
 
 socket.on("opponentLeft", () => {
@@ -182,6 +288,15 @@ socket.on("opponentLeft", () => {
   roomCode = null;
   board = null;
   showLobby("Opponent disconnected. Create or join a new game.");
+});
+
+document.getElementById("findMatchBtn").addEventListener("click", () => {
+  document.getElementById("lobbyMsg").textContent = "";
+  socket.emit("findMatch");
+});
+
+document.getElementById("cancelMatchBtn").addEventListener("click", () => {
+  socket.emit("cancelMatchmaking");
 });
 
 document.getElementById("createBtn").addEventListener("click", () => {

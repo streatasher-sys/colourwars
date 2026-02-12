@@ -9,6 +9,7 @@
   function criticalMass() {
     return 4;
   }
+  const MAX_ORBS = 8;
 
   function neighbors(rows, cols, row, col) {
     const result = [];
@@ -53,12 +54,12 @@
     board[row][col].count = 0;
     board[row][col].owner = 0;
     for (const [r, c] of neighbors(rows, cols, row, col)) {
-      board[r][c].count += orbsPerNeighbor;
+      board[r][c].count = Math.min(MAX_ORBS, board[r][c].count + orbsPerNeighbor);
       board[r][c].owner = player;
     }
   }
 
-  function resolve(board, rows, cols, player) {
+  function resolve(board, rows, cols, player, getWinner) {
     let changed = true;
     while (changed) {
       changed = false;
@@ -67,10 +68,15 @@
           if (isUnstable(board, r, c)) {
             explode(board, rows, cols, r, c, player);
             changed = true;
+            if (getWinner) {
+              const w = getWinner();
+              if (w !== 0) return w;
+            }
           }
         }
       }
     }
+    return 0;
   }
 
   function resolveOneStep(board, rows, cols, player) {

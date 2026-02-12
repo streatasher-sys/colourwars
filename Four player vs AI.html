@@ -49,6 +49,7 @@ const ctx = canvas.getContext("2d");
 
 // --- Helpers ---
 function criticalMass() { return 4; }
+const MAX_ORBS = 8;
 
 function neighbors(rows, cols, row, col) {
   const result = [];
@@ -78,7 +79,7 @@ function explode(board, row, col, player) {
   board[row][col].count = 0;
   board[row][col].owner = 0;
   for (const [r, c] of neighbors(rows, cols, row, col)) {
-    board[r][c].count += orbsPerNeighbor;
+    board[r][c].count = Math.min(MAX_ORBS, board[r][c].count + orbsPerNeighbor);
     board[r][c].owner = player;
   }
 }
@@ -92,10 +93,13 @@ function resolve(board, player) {
         if (isUnstable(board, r, c)) {
           explode(board, r, c, player);
           changed = true;
+          const w = gameOver(board);
+          if (w !== 0) return w;
         }
       }
     }
   }
+  return 0;
 }
 
 function resolveOneStep(board, player) {
@@ -119,6 +123,11 @@ function animationTick() {
   const s = animationState;
   s.steps++;
   if (!resolveOneStep(s.board, s.player)) {
+    s.onDone();
+    animationState = null;
+    return;
+  }
+  if (gameOver(s.board) !== 0) {
     s.onDone();
     animationState = null;
     return;
