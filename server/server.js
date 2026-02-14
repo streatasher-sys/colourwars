@@ -2,9 +2,11 @@ require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const path = require("path");
+const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 const auth = require("./auth");
 const db = require("./db");
+const rating = require("./rating");
 
 const PORT = process.env.PORT || 3000;
 const ROOT = path.join(__dirname, "..");
@@ -144,6 +146,16 @@ function countOrbsByPlayer4(board) {
   return counts;
 }
 
+function recordEliminations4(room) {
+  const counts = countOrbsByPlayer4(room.board);
+  const alreadyEliminated = new Set((room.eliminationOrder || []).flat());
+  const newlyEliminated = PLAYERS_4.filter((p) => counts[p] === 0 && !alreadyEliminated.has(p));
+  if (newlyEliminated.length > 0) {
+    if (!room.eliminationOrder) room.eliminationOrder = [];
+    room.eliminationOrder.push(newlyEliminated);
+  }
+}
+
 function gameOver4(board) {
   const counts = countOrbsByPlayer4(board);
   const survivors = PLAYERS_4.filter((p) => counts[p] > 0);
@@ -239,6 +251,7 @@ function runAITurn4(io, roomCode, room) {
   const [row, col] = move;
   makeMove(room.board, row, col, cp);
   const winner = resolve(room.board, cp, () => gameOver4(room.board)) || gameOver4(room.board);
+  recordEliminations4(room);
   if (winner !== 0) {
     room.winner = winner;
     if (room.turnTimeoutId) clearTimeout(room.turnTimeoutId);
@@ -249,7 +262,10 @@ function runAITurn4(io, roomCode, room) {
     scheduleTurnTimeout4(io, roomCode, room);
   }
   io.to(roomCode).emit("gameState", getGameState4(room));
-  if (winner !== 0) setTimeout(() => rooms.delete(roomCode), 5000);
+  if (winner !== 0) {
+    apply4PlayerRatingUpdates(room);
+    setTimeout(() => rooms.delete(roomCode), 5000);
+  }
 }
 
 function getPlayerId4(room, socketId) {
@@ -289,6 +305,13 @@ function matchFourPlayers(io) {
     board,
     currentPlayerIndex: 0,
     players: { 1: ids[0], 2: ids[1], 3: ids[2], 4: ids[3] },
+    playerUserIds: {
+      1: (io.sockets.sockets.get(ids[0]) || {}).userId || null,
+      2: (io.sockets.sockets.get(ids[1]) || {}).userId || null,
+      3: (io.sockets.sockets.get(ids[2]) || {}).userId || null,
+      4: (io.sockets.sockets.get(ids[3]) || {}).userId || null,
+    },
+    eliminationOrder: [],
     playerTimeRemaining: { [RED]: TURN_TIME_SEC, [GREEN]: TURN_TIME_SEC, [BLUE]: TURN_TIME_SEC, [YELLOW]: TURN_TIME_SEC },
     playerIsAI: {},
     turnStartTime: Date.now(),
@@ -422,6 +445,26 @@ function matchTwoPlayers(io) {
   scheduleTurnTimeout(io, code, room);
 }
 
+function apply4PlayerRatingUpdates(room) {
+  const playerUserIds = room.playerUserIds || {};
+  const userIds = [1, 2, 3, 4].map((slot) => playerUserIds[slot]).filter(Boolean);
+  if (userIds.length < 4) return;
+  const winner = room.winner;
+  const winnerIdx = PLAYERS_4.indexOf(winner);
+  const eliminationOrder = room.eliminationOrder || [];
+  const reversed = eliminationOrder.slice().reverse();
+  const tiedGroups = [[winnerIdx], ...reversed.map((g) => g.map((pid) => PLAYERS_4.indexOf(pid)))];
+  const placementOrder = [winnerIdx, ...reversed.flat().map((pid) => PLAYERS_4.indexOf(pid))];
+  db.getRatingsForUserIds(userIds)
+    .then((ratings) => {
+      const deltas = rating.computeRatingChanges(placementOrder, ratings, tiedGroups);
+      return Promise.all(
+        userIds.map((uid, i) => db.updateUserRating(uid, deltas[i]))
+      );
+    })
+    .catch((err) => console.error("Rating update failed:", err));
+}
+
 // --- Express + Socket.io ---
 const app = express();
 const server = http.createServer(app);
@@ -437,6 +480,16 @@ app.get("/", (req, res) => {
 });
 
 io.on("connection", (socket) => {
+  socket.on("auth", (token) => {
+    if (!token) return;
+    try {
+      const decoded = jwt.verify(token, auth.JWT_SECRET);
+      socket.userId = decoded.userId;
+    } catch (e) {
+      socket.userId = null;
+    }
+  });
+
   socket.on("createRoom", () => {
     let code = randomCode();
     while (rooms.has(code)) code = randomCode();
@@ -524,11 +577,13 @@ io.on("connection", (socket) => {
     while (rooms.has(code)) code = randomCode();
 
     const board = createBoard4();
-    const room = {
-      mode: "4player",
-      board,
-      currentPlayerIndex: 0,
-      players: { 1: socket.id, 2: null, 3: null, 4: null },
+  const room = {
+    mode: "4player",
+    board,
+    currentPlayerIndex: 0,
+    players: { 1: socket.id, 2: null, 3: null, 4: null },
+    playerUserIds: { 1: socket.userId || null, 2: null, 3: null, 4: null },
+    eliminationOrder: [],
       playerTimeRemaining: { [RED]: TURN_TIME_SEC, [GREEN]: TURN_TIME_SEC, [BLUE]: TURN_TIME_SEC, [YELLOW]: TURN_TIME_SEC },
       playerIsAI: {},
       turnStartTime: Date.now(),
@@ -567,6 +622,8 @@ io.on("connection", (socket) => {
 
     const playerId = PLAYERS_4[firstFree - 1];
     room.players[firstFree] = socket.id;
+    if (!room.playerUserIds) room.playerUserIds = { 1: null, 2: null, 3: null, 4: null };
+    room.playerUserIds[firstFree] = socket.userId || null;
     const count = [1, 2, 3, 4].filter((i) => room.players[i]).length;
     room.playersReady = count >= 2;
     if (!room.playerTimeRemaining) {
@@ -614,6 +671,7 @@ io.on("connection", (socket) => {
       if (!makeMove(room.board, row, col, player)) return;
 
       const winner = resolve(room.board, player, () => gameOver4(room.board)) || gameOver4(room.board);
+      recordEliminations4(room);
 
       if (winner !== 0) {
         room.winner = winner;
@@ -628,6 +686,7 @@ io.on("connection", (socket) => {
       io.to(roomCode).emit("gameState", getGameState4(room));
 
       if (winner !== 0) {
+        apply4PlayerRatingUpdates(room);
         setTimeout(() => rooms.delete(roomCode), 5000);
       }
       return;

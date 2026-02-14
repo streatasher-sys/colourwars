@@ -61,7 +61,7 @@ router.post("/register", express.json(), async (req, res) => {
     );
     res.status(201).json({
       token,
-      user: { id: user.id, username: user.username, email: user.email },
+      user: { id: user.id, username: user.username, email: user.email, rating: user.rating ?? 800 },
     });
   } catch (err) {
     if (err.message && err.message.includes("not configured")) {
@@ -92,9 +92,10 @@ router.post("/login", express.json(), async (req, res) => {
       JWT_SECRET,
       { expiresIn: "7d" }
     );
+    const fullUser = await db.findUserById(user.id);
     res.json({
       token,
-      user: { id: user.id, username: user.username, email: user.email },
+      user: { id: user.id, username: user.username, email: user.email, rating: fullUser?.rating ?? 800 },
     });
   } catch (err) {
     if (err.message && err.message.includes("not configured")) {
@@ -117,6 +118,7 @@ router.get("/me", authMiddleware, async (req, res) => {
         username: user.username,
         email: user.email,
         profile_picture_url: user.profile_picture_url || null,
+        rating: user.rating ?? 800,
       },
     });
   } catch (err) {
@@ -143,6 +145,7 @@ router.patch("/profile", authMiddleware, express.json(), async (req, res) => {
         username: user.username,
         email: user.email,
         profile_picture_url: user.profile_picture_url || null,
+        rating: user.rating ?? 800,
       },
     });
   } catch (err) {

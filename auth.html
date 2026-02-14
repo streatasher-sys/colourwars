@@ -57,7 +57,7 @@
 </div>
 
 <div id="logoutDiv" style="display: none;">
-  <p>Logged in as <strong id="userDisplay"></strong></p>
+  <p>Logged in as <strong id="userDisplay"></strong> <span id="userRating" style="color:#666;font-size:14px;"></span></p>
   <button type="button" id="logoutBtn">Log out</button>
   <a href="/" class="backLink">← Return to main page</a>
 </div>
@@ -80,8 +80,10 @@ function showForms(show) {
   document.getElementById("logoutDiv").style.display = show ? "none" : "block";
 }
 
-function showLoggedIn(username) {
-  document.getElementById("userDisplay").textContent = username;
+function showLoggedIn(user) {
+  const u = typeof user === "string" ? { username: user, rating: 800 } : user;
+  document.getElementById("userDisplay").textContent = u.username;
+  document.getElementById("userRating").textContent = "(" + (u.rating ?? 800) + ")";
   showForms(false);
   document.querySelector("#logoutDiv .backLink").style.display = "inline-block";
 }
@@ -127,7 +129,7 @@ document.getElementById("register").addEventListener("submit", async (e) => {
       return;
     }
     setToken(data.token);
-    showLoggedIn(data.user.username);
+    showLoggedIn(data.user);
   } catch (err) {
     errEl.textContent = "Network error";
   }
@@ -150,7 +152,7 @@ document.getElementById("login").addEventListener("submit", async (e) => {
       return;
     }
     setToken(data.token);
-    showLoggedIn(data.user.username);
+    showLoggedIn(data.user);
   } catch (err) {
     errEl.textContent = "Network error";
   }
@@ -163,7 +165,7 @@ document.getElementById("logoutBtn").addEventListener("click", () => {
 if (getToken()) {
   fetch(API + "/me", { headers: { Authorization: "Bearer " + getToken() } })
     .then((r) => (r.ok ? r.json() : Promise.reject()))
-    .then((d) => showLoggedIn(d.user.username))
+    .then((d) => showLoggedIn(d.user))
     .catch(() => showLoggedOut());
 } else {
   document.getElementById("tabRegister").classList.add("active");

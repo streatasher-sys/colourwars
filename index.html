@@ -36,6 +36,11 @@
       font-weight: 500;
       color: #333;
     }
+    #authHeader .rating {
+      font-size: 13px;
+      color: #666;
+      font-weight: 500;
+    }
     #authHeader .addPhotoBtn {
       font-size: 12px;
       padding: 4px 8px;
@@ -88,6 +93,7 @@
       <img id="avatarImg" class="avatar" src="" alt="" title="Click to change photo" style="display: none;">
       <div id="avatarPlaceholder" class="avatar" title="Add profile picture" style="display: none; cursor: pointer; line-height: 36px; text-align: center; font-size: 18px; color: #666;">+</div>
       <span class="username" id="headerUsername"></span>
+      <span class="rating" id="headerRating"></span>
       <button type="button" class="addPhotoBtn" id="addPhotoBtn">Add photo</button>
       <a href="/auth.html">Log out</a>
     </div>
@@ -135,6 +141,7 @@ function showLoggedIn(user) {
   document.getElementById("loggedOutArea").style.display = "none";
   document.getElementById("loggedInArea").style.display = "block";
   document.getElementById("headerUsername").textContent = user.username;
+  document.getElementById("headerRating").textContent = "(" + (user.rating ?? 800) + ")";
   const img = document.getElementById("avatarImg");
   const placeholder = document.getElementById("avatarPlaceholder");
   if (user.profile_picture_url) {

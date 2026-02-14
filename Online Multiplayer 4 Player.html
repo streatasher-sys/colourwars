@@ -61,9 +61,14 @@ if (typeof io === "undefined") {
   const socket = io();
   const statusEl = document.getElementById("connectionStatus");
   statusEl.textContent = "Connecting...";
+  function emitAuth() {
+    const token = localStorage.getItem("colourwars_token");
+    if (token) socket.emit("auth", token);
+  }
   socket.on("connect", () => {
     statusEl.textContent = "Connected";
     statusEl.style.color = "#282";
+    emitAuth();
   });
   socket.on("connect_error", () => {
     statusEl.textContent = "Disconnected. Is the server running? (npm start)";
@@ -314,6 +319,7 @@ if (typeof io === "undefined") {
 
   document.getElementById("findMatchBtn").addEventListener("click", () => {
     document.getElementById("lobbyMsg").textContent = "";
+    emitAuth();
     socket.emit("findMatch4");
   });
 
@@ -322,6 +328,7 @@ if (typeof io === "undefined") {
   });
 
   document.getElementById("createBtn").addEventListener("click", () => {
+    emitAuth();
     socket.emit("createRoom4");
   });
 
@@ -333,6 +340,7 @@ if (typeof io === "undefined") {
     }
     document.getElementById("joinBtn").disabled = true;
     document.getElementById("lobbyMsg").textContent = "Joining...";
+    emitAuth();
     socket.emit("joinRoom4", code);
   });
 
