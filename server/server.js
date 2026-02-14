@@ -203,6 +203,7 @@ function getGameState4(room) {
     winner: room.winner || 0,
     playerTimeRemaining: room.playerTimeRemaining ? { ...room.playerTimeRemaining } : null,
     playerIsAI: room.playerIsAI ? { ...room.playerIsAI } : null,
+    playerNames: room.playerNames ? { ...room.playerNames } : {},
     turnStartTime: room.turnStartTime ?? Date.now(),
     playersReady: room.playersReady || false,
     mode: "4player",
@@ -263,7 +264,7 @@ function runAITurn4(io, roomCode, room) {
   }
   io.to(roomCode).emit("gameState", getGameState4(room));
   if (winner !== 0) {
-    apply4PlayerRatingUpdates(room);
+    apply4PlayerRatingUpdates(io, roomCode, room);
     setTimeout(() => rooms.delete(roomCode), 5000);
   }
 }
@@ -273,6 +274,16 @@ function getPlayerId4(room, socketId) {
     if (room.players[i] === socketId) return PLAYERS_4[i - 1];
   }
   return null;
+}
+
+async function getUsernameForUserId(userId) {
+  if (!userId) return "Guest";
+  try {
+    const user = await db.findUserById(userId);
+    return user ? user.username : "Guest";
+  } catch (e) {
+    return "Guest";
+  }
 }
 
 // --- Rooms ---
@@ -294,22 +305,30 @@ function removeFromQueue4(socketId) {
   const i = matchmakingQueue4.indexOf(socketId);
   if (i !== -1) matchmakingQueue4.splice(i, 1);
 }
-function matchFourPlayers(io) {
+async function matchFourPlayers(io) {
   if (matchmakingQueue4.length < 4) return;
   const ids = matchmakingQueue4.splice(0, 4);
   let code = randomCode();
   while (rooms.has(code)) code = randomCode();
   const board = createBoard4();
+  const socks = ids.map((id) => io.sockets.sockets.get(id));
+  const names = await Promise.all(socks.map((s) => getUsernameForUserId(s?.userId)));
   const room = {
     mode: "4player",
     board,
     currentPlayerIndex: 0,
     players: { 1: ids[0], 2: ids[1], 3: ids[2], 4: ids[3] },
     playerUserIds: {
-      1: (io.sockets.sockets.get(ids[0]) || {}).userId || null,
-      2: (io.sockets.sockets.get(ids[1]) || {}).userId || null,
-      3: (io.sockets.sockets.get(ids[2]) || {}).userId || null,
-      4: (io.sockets.sockets.get(ids[3]) || {}).userId || null,
+      1: socks[0]?.userId || null,
+      2: socks[1]?.userId || null,
+      3: socks[2]?.userId || null,
+      4: socks[3]?.userId || null,
+    },
+    playerNames: {
+      [RED]: names[0],
+      [GREEN]: names[1],
+      [BLUE]: names[2],
+      [YELLOW]: names[3],
     },
     eliminationOrder: [],
     playerTimeRemaining: { [RED]: TURN_TIME_SEC, [GREEN]: TURN_TIME_SEC, [BLUE]: TURN_TIME_SEC, [YELLOW]: TURN_TIME_SEC },
@@ -320,7 +339,7 @@ function matchFourPlayers(io) {
   };
   rooms.set(code, room);
   for (let i = 0; i < 4; i++) {
-    const sock = io.sockets.sockets.get(ids[i]);
+    const sock = socks[i];
     if (sock) {
       sock.join(code);
       sock.emit("matched", { code, player: PLAYERS_4[i], mode: "4player" });
@@ -337,6 +356,7 @@ function getGameState2(room) {
     winner: room.winner || 0,
     redTimeRemaining: room.redTimeRemaining,
     greenTimeRemaining: room.greenTimeRemaining,
+    playerNames: room.playerNames ? { ...room.playerNames } : {},
     turnStartTime: room.turnStartTime,
     redIsAI: room.redIsAI || false,
     greenIsAI: room.greenIsAI || false,
@@ -409,13 +429,19 @@ function runAITurn(io, roomCode, room) {
   if (winner) setTimeout(() => rooms.delete(roomCode), 5000);
 }
 
-function matchTwoPlayers(io) {
+async function matchTwoPlayers(io) {
   if (matchmakingQueue.length < 2) return;
   const id1 = matchmakingQueue.shift();
   const id2 = matchmakingQueue.shift();
   let code = randomCode();
   while (rooms.has(code)) code = randomCode();
   const board = createBoard();
+  const sock1 = io.sockets.sockets.get(id1);
+  const sock2 = io.sockets.sockets.get(id2);
+  const [redName, greenName] = await Promise.all([
+    getUsernameForUserId(sock1?.userId),
+    getUsernameForUserId(sock2?.userId),
+  ]);
   const room = {
     mode: "2player",
     board,
@@ -423,6 +449,7 @@ function matchTwoPlayers(io) {
     redHasPlayed: true,
     greenHasPlayed: true,
     players: { red: id1, green: id2 },
+    playerNames: { [RED]: redName, [GREEN]: greenName },
     redTimeRemaining: TURN_TIME_SEC,
     greenTimeRemaining: TURN_TIME_SEC,
     turnStartTime: Date.now(),
@@ -431,8 +458,6 @@ function matchTwoPlayers(io) {
     greenIsAI: false,
   };
   rooms.set(code, room);
-  const sock1 = io.sockets.sockets.get(id1);
-  const sock2 = io.sockets.sockets.get(id2);
   if (sock1) {
     sock1.join(code);
     sock1.emit("matched", { code, player: RED });
@@ -445,24 +470,45 @@ function matchTwoPlayers(io) {
   scheduleTurnTimeout(io, code, room);
 }
 
-function apply4PlayerRatingUpdates(room) {
+function apply4PlayerRatingUpdates(io, roomCode, room) {
   const playerUserIds = room.playerUserIds || {};
   const userIds = [1, 2, 3, 4].map((slot) => playerUserIds[slot]).filter(Boolean);
-  if (userIds.length < 4) return;
+  if (userIds.length < 4) {
+    io.to(roomCode).emit("ratingResults", { winner: room.winner, results: [] });
+    return;
+  }
   const winner = room.winner;
   const winnerIdx = PLAYERS_4.indexOf(winner);
   const eliminationOrder = room.eliminationOrder || [];
   const reversed = eliminationOrder.slice().reverse();
   const tiedGroups = [[winnerIdx], ...reversed.map((g) => g.map((pid) => PLAYERS_4.indexOf(pid)))];
   const placementOrder = [winnerIdx, ...reversed.flat().map((pid) => PLAYERS_4.indexOf(pid))];
+  const playerNames = room.playerNames || {};
   db.getRatingsForUserIds(userIds)
     .then((ratings) => {
       const deltas = rating.computeRatingChanges(placementOrder, ratings, tiedGroups);
+      const results = placementOrder.map((idx) => {
+        const oldRating = ratings[idx];
+        const delta = deltas[idx];
+        const newRating = Math.max(0, oldRating + delta);
+        return {
+          playerId: PLAYERS_4[idx],
+          username: playerNames[PLAYERS_4[idx]] || "Guest",
+          oldRating,
+          newRating,
+          delta,
+        };
+      });
       return Promise.all(
         userIds.map((uid, i) => db.updateUserRating(uid, deltas[i]))
-      );
+      ).then(() => {
+        io.to(roomCode).emit("ratingResults", { winner, results });
+      });
     })
-    .catch((err) => console.error("Rating update failed:", err));
+    .catch((err) => {
+      console.error("Rating update failed:", err);
+      io.to(roomCode).emit("ratingResults", { winner: room.winner, results: [] });
+    });
 }
 
 // --- Express + Socket.io ---
@@ -490,11 +536,12 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("createRoom", () => {
+  socket.on("createRoom", async () => {
     let code = randomCode();
     while (rooms.has(code)) code = randomCode();
 
     const board = createBoard();
+    const redName = await getUsernameForUserId(socket.userId);
     const room = {
       mode: "2player",
       board,
@@ -502,6 +549,7 @@ io.on("connection", (socket) => {
       redHasPlayed: true,
       greenHasPlayed: true,
       players: { red: socket.id, green: null },
+      playerNames: { [RED]: redName, [GREEN]: "—" },
       redTimeRemaining: TURN_TIME_SEC,
       greenTimeRemaining: TURN_TIME_SEC,
       turnStartTime: Date.now(),
@@ -517,11 +565,11 @@ io.on("connection", (socket) => {
     scheduleTurnTimeout(io, code, room);
   });
 
-  socket.on("findMatch", () => {
+  socket.on("findMatch", async () => {
     if (matchmakingQueue.includes(socket.id)) return;
     matchmakingQueue.push(socket.id);
     socket.emit("matchmakingStatus", { searching: true, position: matchmakingQueue.length });
-    if (matchmakingQueue.length >= 2) matchTwoPlayers(io);
+    if (matchmakingQueue.length >= 2) await matchTwoPlayers(io);
   });
 
   socket.on("cancelMatchmaking", () => {
@@ -529,11 +577,11 @@ io.on("connection", (socket) => {
     socket.emit("matchmakingStatus", { searching: false });
   });
 
-  socket.on("findMatch4", () => {
+  socket.on("findMatch4", async () => {
     if (matchmakingQueue4.includes(socket.id)) return;
     matchmakingQueue4.push(socket.id);
     socket.emit("matchmakingStatus", { searching: true, position: matchmakingQueue4.length, mode: "4player" });
-    if (matchmakingQueue4.length >= 4) matchFourPlayers(io);
+    if (matchmakingQueue4.length >= 4) await matchFourPlayers(io);
   });
 
   socket.on("cancelMatchmaking4", () => {
@@ -541,7 +589,7 @@ io.on("connection", (socket) => {
     socket.emit("matchmakingStatus", { searching: false, mode: "4player" });
   });
 
-  socket.on("joinRoom", (code) => {
+  socket.on("joinRoom", async (code) => {
     const roomCode = String(code).toUpperCase().trim();
     const room = rooms.get(roomCode);
 
@@ -564,6 +612,8 @@ io.on("connection", (socket) => {
     }
 
     room.players.green = socket.id;
+    if (!room.playerNames) room.playerNames = {};
+    room.playerNames[GREEN] = await getUsernameForUserId(socket.userId);
     room.turnStartTime = Date.now();
     socket.join(roomCode);
     socket.emit("joinedRoom", { code: roomCode, player: GREEN });
@@ -572,18 +622,20 @@ io.on("connection", (socket) => {
     scheduleTurnTimeout(io, roomCode, room);
   });
 
-  socket.on("createRoom4", () => {
+  socket.on("createRoom4", async () => {
     let code = randomCode();
     while (rooms.has(code)) code = randomCode();
 
     const board = createBoard4();
-  const room = {
-    mode: "4player",
-    board,
-    currentPlayerIndex: 0,
-    players: { 1: socket.id, 2: null, 3: null, 4: null },
-    playerUserIds: { 1: socket.userId || null, 2: null, 3: null, 4: null },
-    eliminationOrder: [],
+    const redName = await getUsernameForUserId(socket.userId);
+    const room = {
+      mode: "4player",
+      board,
+      currentPlayerIndex: 0,
+      players: { 1: socket.id, 2: null, 3: null, 4: null },
+      playerUserIds: { 1: socket.userId || null, 2: null, 3: null, 4: null },
+      playerNames: { [RED]: redName, [GREEN]: "—", [BLUE]: "—", [YELLOW]: "—" },
+      eliminationOrder: [],
       playerTimeRemaining: { [RED]: TURN_TIME_SEC, [GREEN]: TURN_TIME_SEC, [BLUE]: TURN_TIME_SEC, [YELLOW]: TURN_TIME_SEC },
       playerIsAI: {},
       turnStartTime: Date.now(),
@@ -598,7 +650,7 @@ io.on("connection", (socket) => {
     scheduleTurnTimeout4(io, code, room);
   });
 
-  socket.on("joinRoom4", (code) => {
+  socket.on("joinRoom4", async (code) => {
     const roomCode = String(code).toUpperCase().trim();
     const room = rooms.get(roomCode);
 
@@ -624,6 +676,8 @@ io.on("connection", (socket) => {
     room.players[firstFree] = socket.id;
     if (!room.playerUserIds) room.playerUserIds = { 1: null, 2: null, 3: null, 4: null };
     room.playerUserIds[firstFree] = socket.userId || null;
+    if (!room.playerNames) room.playerNames = {};
+    room.playerNames[playerId] = await getUsernameForUserId(socket.userId);
     const count = [1, 2, 3, 4].filter((i) => room.players[i]).length;
     room.playersReady = count >= 2;
     if (!room.playerTimeRemaining) {
@@ -686,7 +740,7 @@ io.on("connection", (socket) => {
       io.to(roomCode).emit("gameState", getGameState4(room));
 
       if (winner !== 0) {
-        apply4PlayerRatingUpdates(room);
+        apply4PlayerRatingUpdates(io, roomCode, room);
         setTimeout(() => rooms.delete(roomCode), 5000);
       }
       return;

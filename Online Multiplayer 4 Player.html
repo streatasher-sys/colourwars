@@ -15,6 +15,24 @@
     #playerCount { margin-bottom: 6px; font-size: 14px; color: #282; }
     #timerBar { margin-bottom: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     #timerBar .timer { font-size: 14px; font-weight: bold; }
+    #endScreen {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center;
+      z-index: 200; flex-direction: column; gap: 16px; padding: 24px;
+    }
+    #endScreen.visible { display: flex; }
+    #endScreen .endBox {
+      background: white; border-radius: 12px; padding: 24px; max-width: 360px; width: 100%;
+      text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }
+    #endScreen .winnerText { font-size: 22px; font-weight: bold; margin-bottom: 16px; }
+    #endScreen .ratingTable { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+    #endScreen .ratingTable th, #endScreen .ratingTable td { padding: 8px; text-align: left; border-bottom: 1px solid #eee; }
+    #endScreen .ratingTable th { font-weight: 600; color: #333; }
+    #endScreen .deltaPos { color: #282; font-weight: 600; }
+    #endScreen .deltaNeg { color: #c22; font-weight: 600; }
+    #endScreen .backBtn { font-size: 16px; padding: 12px 24px; background: #282; color: white; border: none; border-radius: 8px; cursor: pointer; margin-top: 12px; }
+    #endScreen .backBtn:hover { background: #1a6b1a; }
   </style>
 </head>
 <body>
@@ -48,6 +66,20 @@
     <span class="timer" id="yellowTimer" style="color: #da4;">5:00</span>
   </div>
   <canvas id="boardCanvas" width="350" height="350"></canvas>
+  <div id="endScreen">
+    <div class="endBox">
+      <div class="winnerText" id="endWinnerText">Red wins!</div>
+      <div id="endRatingArea">
+        <div id="endRatingLoading" style="color:#666; margin:12px 0;">Loading rating changes...</div>
+        <table class="ratingTable" id="endRatingTable" style="display:none;">
+          <thead><tr><th>Player</th><th>Rating</th><th>Change</th></tr></thead>
+          <tbody id="endRatingBody"></tbody>
+        </table>
+        <div id="endRatingNone" style="display:none; color:#666; margin:12px 0;">No rating changes (guest game)</div>
+      </div>
+      <button class="backBtn" id="endBackBtn">Back to Main</button>
+    </div>
+  </div>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
@@ -99,6 +131,7 @@ if (typeof io === "undefined") {
   let playerCount = 0;
   let playerTimeRemaining = null;
   let playerIsAI = null;
+  let playerNames = {};
   let turnStartTime = 0;
   let playersReady = false;
   let timerInterval = null;
@@ -120,6 +153,8 @@ if (typeof io === "undefined") {
     document.getElementById("gameArea").style.display = "block";
     document.getElementById("matchmakingStatus").style.display = "none";
     document.getElementById("roomCodeVal").textContent = roomCode;
+    const endEl = document.getElementById("endScreen");
+    if (endEl) endEl.classList.remove("visible");
     updatePlayerCount();
     updatePlayerInfo();
   }
@@ -172,6 +207,37 @@ if (typeof io === "undefined") {
     }
   }
 
+  function showEndScreen(winningPlayer, results) {
+    const el = document.getElementById("endScreen");
+    const winnerEl = document.getElementById("endWinnerText");
+    const loadingEl = document.getElementById("endRatingLoading");
+    const tableEl = document.getElementById("endRatingTable");
+    const bodyEl = document.getElementById("endRatingBody");
+    const noneEl = document.getElementById("endRatingNone");
+    if (!el) return;
+    winnerEl.textContent = PLAYER_NAMES[winningPlayer] + " wins!";
+    winnerEl.style.color = PLAYER_COLORS[winningPlayer] || "#282";
+    if (results === null) {
+      loadingEl.style.display = "block";
+      tableEl.style.display = "none";
+      noneEl.style.display = "none";
+    } else if (results.length === 0) {
+      loadingEl.style.display = "none";
+      tableEl.style.display = "none";
+      noneEl.style.display = "block";
+    } else {
+      loadingEl.style.display = "none";
+      noneEl.style.display = "none";
+      tableEl.style.display = "table";
+      bodyEl.innerHTML = results.map((r) => {
+        const deltaStr = r.delta >= 0 ? "+" + r.delta : String(r.delta);
+        const deltaClass = r.delta >= 0 ? "deltaPos" : "deltaNeg";
+        return `<tr><td><span style="color:${PLAYER_COLORS[r.playerId]}">${PLAYER_NAMES[r.playerId]}</span> — ${r.username}</td><td>${r.oldRating} → ${r.newRating}</td><td class="${deltaClass}">${deltaStr}</td></tr>`;
+      }).join("");
+    }
+    el.classList.add("visible");
+  }
+
   function updateTurnIndicator() {
     const turnEl = document.getElementById("turnIndicator");
     if (winner !== 0) {
@@ -182,10 +248,13 @@ if (typeof io === "undefined") {
     const current = PLAYERS[currentPlayerIndex];
     const isMyTurn = current === myPlayer;
     const cpIsAI = (playerIsAI && playerIsAI[current]) || false;
+    const cpLabel = playerNames[current] && playerNames[current] !== "—"
+      ? PLAYER_NAMES[current] + " (" + playerNames[current] + ")"
+      : PLAYER_NAMES[current];
     if (isMyTurn) {
-      turnEl.textContent = "Your turn (" + PLAYER_NAMES[current] + ")";
+      turnEl.textContent = "Your turn (" + cpLabel + ")";
     } else {
-      turnEl.textContent = (cpIsAI ? "AI" : "Opponent") + "'s turn (" + PLAYER_NAMES[current] + ")";
+      turnEl.textContent = (cpIsAI ? "AI" : (playerNames[current] || "Opponent")) + "'s turn (" + cpLabel + ")";
     }
     turnEl.style.color = PLAYER_COLORS[current] || "";
   }
@@ -211,7 +280,10 @@ if (typeof io === "undefined") {
         }
       }
       const el = document.getElementById(ids[i]);
-      if (el) el.textContent = PLAYER_NAMES[pids[i]] + ": " + formatTime(display);
+      const label = playerNames[pids[i]] && playerNames[pids[i]] !== "—"
+        ? PLAYER_NAMES[pids[i]] + " — " + playerNames[pids[i]]
+        : PLAYER_NAMES[pids[i]];
+      if (el) el.textContent = label + ": " + formatTime(display);
     }
   }
 
@@ -276,6 +348,7 @@ if (typeof io === "undefined") {
     gameEnded = winner !== 0;
     playerTimeRemaining = state.playerTimeRemaining || null;
     playerIsAI = state.playerIsAI || null;
+    playerNames = state.playerNames || {};
     turnStartTime = state.turnStartTime ?? Date.now();
     playersReady = state.playersReady || false;
     drawBoard();
@@ -287,8 +360,16 @@ if (typeof io === "undefined") {
     }
     if (gameEnded) {
       if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-      setTimeout(() => alert(PLAYER_NAMES[winner] + " wins!"), 100);
+      showEndScreen(winner, null);
     }
+  });
+
+  socket.on("ratingResults", (data) => {
+    if (data && data.winner) showEndScreen(data.winner, data.results || []);
+  });
+
+  document.getElementById("endBackBtn").addEventListener("click", () => {
+    window.location.href = "/";
   });
 
   socket.on("playerTimedOut", (data) => {

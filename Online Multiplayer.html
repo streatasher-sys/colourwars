@@ -14,6 +14,19 @@
     #playerInfo { margin-bottom: 6px; font-size: 14px; }
     #timerBar { margin-bottom: 8px; display: flex; gap: 12px; align-items: center; }
     #timerBar .timer { font-size: 16px; font-weight: bold; }
+    #endScreen {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center;
+      z-index: 200; flex-direction: column; gap: 16px; padding: 24px;
+    }
+    #endScreen.visible { display: flex; }
+    #endScreen .endBox {
+      background: white; border-radius: 12px; padding: 24px; max-width: 320px; width: 100%;
+      text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }
+    #endScreen .winnerText { font-size: 22px; font-weight: bold; margin-bottom: 16px; }
+    #endScreen .backBtn { font-size: 16px; padding: 12px 24px; background: #282; color: white; border: none; border-radius: 8px; cursor: pointer; margin-top: 12px; }
+    #endScreen .backBtn:hover { background: #1a6b1a; }
   </style>
 </head>
 <body>
@@ -44,6 +57,12 @@
     <span class="timer" id="greenTimer" style="color: #282;">5:00</span>
   </div>
   <canvas id="boardCanvas" width="350" height="350"></canvas>
+  <div id="endScreen">
+    <div class="endBox">
+      <div class="winnerText" id="endWinnerText">Red wins!</div>
+      <button class="backBtn" id="endBackBtn">Back to Main</button>
+    </div>
+  </div>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
@@ -57,9 +76,14 @@ if (typeof io === "undefined") {
   const socket = io();
   const statusEl = document.getElementById("connectionStatus");
   statusEl.textContent = "Connecting...";
+  function emitAuth() {
+    const token = localStorage.getItem("colourwars_token");
+    if (token) socket.emit("auth", token);
+  }
   socket.on("connect", () => {
     statusEl.textContent = "Connected";
     statusEl.style.color = "#282";
+    emitAuth();
   });
   socket.on("connect_error", () => {
     statusEl.textContent = "Disconnected. Is the server running? (npm start)";
@@ -88,6 +112,7 @@ let greenTimeRemaining = 300;
 let turnStartTime = 0;
 let redIsAI = false;
 let greenIsAI = false;
+let playerNames = {};
 let playersReady = false;
 let timerInterval = null;
 const canvas = document.getElementById("boardCanvas");
@@ -108,6 +133,17 @@ function showGame(showRoomCode) {
   document.getElementById("gameArea").style.display = "block";
   document.getElementById("matchmakingStatus").style.display = "none";
   document.getElementById("roomCodeVal").textContent = roomCode + (showRoomCode ? " (2 players)" : "");
+  const endEl = document.getElementById("endScreen");
+  if (endEl) endEl.classList.remove("visible");
+}
+
+function showEndScreen(winningPlayer) {
+  const el = document.getElementById("endScreen");
+  const winnerEl = document.getElementById("endWinnerText");
+  if (!el) return;
+  winnerEl.textContent = PLAYER_NAMES[winningPlayer] + " wins!";
+  winnerEl.style.color = PLAYER_COLORS[winningPlayer] || "#282";
+  el.classList.add("visible");
 }
 
 function isUnstable(board, row, col) {
@@ -168,12 +204,14 @@ function updateTurnIndicator() {
     return;
   }
   const isMyTurn = currentPlayer === myPlayer;
-  const cpName = PLAYER_NAMES[currentPlayer];
+  const cpLabel = playerNames[currentPlayer] && playerNames[currentPlayer] !== "—"
+    ? PLAYER_NAMES[currentPlayer] + " (" + playerNames[currentPlayer] + ")"
+    : PLAYER_NAMES[currentPlayer];
   const cpIsAI = (currentPlayer === red && redIsAI) || (currentPlayer === green && greenIsAI);
   if (isMyTurn) {
-    turnEl.textContent = "Your turn (" + cpName + ")";
+    turnEl.textContent = "Your turn (" + cpLabel + ")";
   } else {
-    turnEl.textContent = (cpIsAI ? "AI" : "Opponent") + "'s turn (" + cpName + ")";
+    turnEl.textContent = (cpIsAI ? "AI" : (playerNames[currentPlayer] || "Opponent")) + "'s turn (" + cpLabel + ")";
   }
   turnEl.style.color = PLAYER_COLORS[currentPlayer] || "";
 }
@@ -188,8 +226,10 @@ function updateTimerDisplay() {
     if (currentPlayer === red && !redIsAI) redDisplay = Math.max(0, redTimeRemaining - elapsed);
     else if (currentPlayer === green && !greenIsAI) greenDisplay = Math.max(0, greenTimeRemaining - elapsed);
   }
-  document.getElementById("redTimer").textContent = "Red: " + formatTime(redDisplay);
-  document.getElementById("greenTimer").textContent = "Green: " + formatTime(greenDisplay);
+  const redLabel = playerNames[red] && playerNames[red] !== "—" ? "Red — " + playerNames[red] : "Red";
+  const greenLabel = playerNames[green] && playerNames[green] !== "—" ? "Green — " + playerNames[green] : "Green";
+  document.getElementById("redTimer").textContent = redLabel + ": " + formatTime(redDisplay);
+  document.getElementById("greenTimer").textContent = greenLabel + ": " + formatTime(greenDisplay);
 }
 
 canvas.addEventListener("click", (e) => {
@@ -254,6 +294,7 @@ socket.on("gameState", (state) => {
   turnStartTime = state.turnStartTime ?? Date.now();
   redIsAI = state.redIsAI || false;
   greenIsAI = state.greenIsAI || false;
+  playerNames = state.playerNames || {};
   playersReady = state.playersReady || false;
   drawBoard();
   updateTurnIndicator();
@@ -263,8 +304,12 @@ socket.on("gameState", (state) => {
   }
   if (gameEnded) {
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-    setTimeout(() => alert(PLAYER_NAMES[winner] + " wins!"), 100);
+    showEndScreen(winner);
   }
+});
+
+document.getElementById("endBackBtn").addEventListener("click", () => {
+  window.location.href = "/";
 });
 
 socket.on("playerTimedOut", (data) => {
@@ -292,6 +337,7 @@ socket.on("opponentLeft", () => {
 
 document.getElementById("findMatchBtn").addEventListener("click", () => {
   document.getElementById("lobbyMsg").textContent = "";
+  emitAuth();
   socket.emit("findMatch");
 });
 
@@ -300,6 +346,7 @@ document.getElementById("cancelMatchBtn").addEventListener("click", () => {
 });
 
 document.getElementById("createBtn").addEventListener("click", () => {
+  emitAuth();
   socket.emit("createRoom");
 });
 
@@ -311,6 +358,7 @@ document.getElementById("joinBtn").addEventListener("click", () => {
   }
   document.getElementById("joinBtn").disabled = true;
   document.getElementById("lobbyMsg").textContent = "Joining...";
+  emitAuth();
   socket.emit("joinRoom", code);
 });
 
