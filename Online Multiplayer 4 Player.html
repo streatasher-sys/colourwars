@@ -245,6 +245,11 @@ if (typeof io === "undefined") {
       turnEl.style.color = PLAYER_COLORS[winner];
       return;
     }
+    if (!playersReady) {
+      turnEl.textContent = "Waiting for all players to join...";
+      turnEl.style.color = "#666";
+      return;
+    }
     const current = PLAYERS[currentPlayerIndex];
     const isMyTurn = current === myPlayer;
     const cpIsAI = (playerIsAI && playerIsAI[current]) || false;
@@ -269,9 +274,10 @@ if (typeof io === "undefined") {
     if (!board || gameEnded) return;
     const ids = ["redTimer", "greenTimer", "blueTimer", "yellowTimer"];
     const pids = [red, green, blue, yellow];
+    const shouldCountDown = playersReady && playerTimeRemaining && turnStartTime;
     for (let i = 0; i < 4; i++) {
       let display = (playerTimeRemaining && playerTimeRemaining[pids[i]]) ?? 300;
-      if (playerTimeRemaining && turnStartTime) {
+      if (shouldCountDown) {
         const now = Date.now() / 1000;
         const elapsed = now - (turnStartTime / 1000);
         const cp = PLAYERS[currentPlayerIndex];
@@ -289,6 +295,7 @@ if (typeof io === "undefined") {
 
   canvas.addEventListener("click", (e) => {
     if (!board || gameEnded || winner !== 0) return;
+    if (!playersReady) return;
     if (PLAYERS[currentPlayerIndex] !== myPlayer) return;
 
     const rect = canvas.getBoundingClientRect();

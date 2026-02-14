@@ -472,8 +472,9 @@ async function matchTwoPlayers(io) {
 
 function apply4PlayerRatingUpdates(io, roomCode, room) {
   const playerUserIds = room.playerUserIds || {};
-  const userIds = [1, 2, 3, 4].map((slot) => playerUserIds[slot]).filter(Boolean);
-  if (userIds.length < 4) {
+  const slotUserIds = [1, 2, 3, 4].map((slot) => playerUserIds[slot] || null);
+  const loggedInIds = slotUserIds.filter(Boolean);
+  if (loggedInIds.length === 0) {
     io.to(roomCode).emit("ratingResults", { winner: room.winner, results: [] });
     return;
   }
@@ -484,8 +485,14 @@ function apply4PlayerRatingUpdates(io, roomCode, room) {
   const tiedGroups = [[winnerIdx], ...reversed.map((g) => g.map((pid) => PLAYERS_4.indexOf(pid)))];
   const placementOrder = [winnerIdx, ...reversed.flat().map((pid) => PLAYERS_4.indexOf(pid))];
   const playerNames = room.playerNames || {};
-  db.getRatingsForUserIds(userIds)
-    .then((ratings) => {
+  db.getRatingsForUserIds(loggedInIds)
+    .then((fetchedRatings) => {
+      const byUserId = {};
+      loggedInIds.forEach((uid, i) => { byUserId[uid] = fetchedRatings[i]; });
+      const avgRating = Math.round(
+        fetchedRatings.reduce((a, b) => a + b, 0) / fetchedRatings.length
+      );
+      const ratings = slotUserIds.map((uid) => (uid ? byUserId[uid] : avgRating));
       const deltas = rating.computeRatingChanges(placementOrder, ratings, tiedGroups);
       const results = placementOrder.map((idx) => {
         const oldRating = ratings[idx];
@@ -499,9 +506,10 @@ function apply4PlayerRatingUpdates(io, roomCode, room) {
           delta,
         };
       });
-      return Promise.all(
-        userIds.map((uid, i) => db.updateUserRating(uid, deltas[i]))
-      ).then(() => {
+      const updates = slotUserIds
+        .map((uid, i) => (uid ? db.updateUserRating(uid, deltas[i]) : null))
+        .filter(Boolean);
+      return Promise.all(updates).then(() => {
         io.to(roomCode).emit("ratingResults", { winner, results });
       });
     })
@@ -562,7 +570,6 @@ io.on("connection", (socket) => {
     socket.join(code);
     socket.emit("roomCreated", { code, player: RED });
     emitGameState2(io, code, room);
-    scheduleTurnTimeout(io, code, room);
   });
 
   socket.on("findMatch", async () => {
@@ -647,7 +654,6 @@ io.on("connection", (socket) => {
     socket.join(code);
     socket.emit("roomCreated", { code, player: RED, mode: "4player" });
     socket.emit("gameState", getGameState4(room));
-    scheduleTurnTimeout4(io, code, room);
   });
 
   socket.on("joinRoom4", async (code) => {
@@ -679,12 +685,17 @@ io.on("connection", (socket) => {
     if (!room.playerNames) room.playerNames = {};
     room.playerNames[playerId] = await getUsernameForUserId(socket.userId);
     const count = [1, 2, 3, 4].filter((i) => room.players[i]).length;
-    room.playersReady = count >= 2;
+    room.playersReady = count >= 4;
     if (!room.playerTimeRemaining) {
       room.playerTimeRemaining = { [RED]: TURN_TIME_SEC, [GREEN]: TURN_TIME_SEC, [BLUE]: TURN_TIME_SEC, [YELLOW]: TURN_TIME_SEC };
     }
     if (!room.playerIsAI) room.playerIsAI = {};
-    if (!room.turnStartTime) room.turnStartTime = Date.now();
+    if (count === 4) {
+      room.turnStartTime = Date.now();
+      scheduleTurnTimeout4(io, roomCode, room);
+    } else if (!room.turnStartTime) {
+      room.turnStartTime = Date.now();
+    }
 
     socket.join(roomCode);
     socket.emit("joinedRoom", { code: roomCode, player: playerId, mode: "4player" });
@@ -701,6 +712,7 @@ io.on("connection", (socket) => {
     if (room.mode === "4player") {
       const player = getPlayerId4(room, socket.id);
       if (player === null) return;
+      if (!room.playersReady) return;
       if (PLAYERS_4[room.currentPlayerIndex] !== player) return;
       if (room.playerIsAI && room.playerIsAI[player]) return;
 
