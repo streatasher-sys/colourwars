@@ -157,4 +157,18 @@ router.patch("/profile", authMiddleware, express.json(), async (req, res) => {
   }
 });
 
+router.get("/leaderboard", async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    const entries = await db.getLeaderboard(limit);
+    res.json({ leaderboard: entries });
+  } catch (err) {
+    if (err.message && err.message.includes("not configured")) {
+      return res.status(503).json({ error: "Leaderboard unavailable" });
+    }
+    console.error("Leaderboard error:", err);
+    res.status(500).json({ error: "Failed to load leaderboard" });
+  }
+});
+
 module.exports = { router, authMiddleware, JWT_SECRET };

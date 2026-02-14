@@ -81,6 +81,17 @@
     ul li { margin: 8px 0; }
     ul a { color: #0066cc; }
     ul a:hover { text-decoration: underline; }
+    #leaderboard { margin-top: 28px; }
+    #leaderboard h2 { margin-bottom: 12px; }
+    .leaderboardTable { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .leaderboardTable th, .leaderboardTable td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; }
+    .leaderboardTable th { background: #f5f5f5; font-weight: 600; }
+    .leaderboardTable .rank { width: 40px; text-align: center; }
+    .leaderboardTable .avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 6px; }
+    .leaderboardTable .avatarPlaceholder { width: 28px; height: 28px; border-radius: 50%; background: #ccc; display: inline-block; vertical-align: middle; margin-right: 6px; text-align: center; line-height: 28px; font-size: 12px; color: #666; }
+    .leaderboardTable .rating { font-weight: 600; color: #333; }
+    #leaderboardLoading { color: #666; padding: 12px 0; }
+    #leaderboardError { color: #c00; padding: 12px 0; }
   </style>
 </head>
 <body>
@@ -123,6 +134,18 @@
   <li><strong><a href="/Online%20Multiplayer.html">Online Multiplayer (2 players)</a></strong></li>
   <li><strong><a href="/Online%20Multiplayer%204%20Player.html">Online Multiplayer (4 players)</a></strong></li>
 </ul>
+
+<section id="leaderboard">
+  <h2>Leaderboard</h2>
+  <div id="leaderboardLoading">Loading...</div>
+  <div id="leaderboardError" style="display: none;"></div>
+  <table class="leaderboardTable" id="leaderboardTable" style="display: none;">
+    <thead>
+      <tr><th class="rank">#</th><th>Player</th><th class="rating">Rating</th></tr>
+    </thead>
+    <tbody id="leaderboardBody"></tbody>
+  </table>
+</section>
 
 <script>
 const API = "/api/auth";
@@ -215,6 +238,44 @@ if (getToken()) {
 } else {
   showLoggedOut();
 }
+
+function loadLeaderboard() {
+  fetch(API + "/leaderboard")
+    .then((r) => (r.ok ? r.json() : Promise.reject()))
+    .then((d) => {
+      document.getElementById("leaderboardLoading").style.display = "none";
+      document.getElementById("leaderboardError").style.display = "none";
+      const tbody = document.getElementById("leaderboardBody");
+      tbody.innerHTML = "";
+      if (!d.leaderboard || d.leaderboard.length === 0) {
+        tbody.innerHTML = "<tr><td colspan='3'>No players yet</td></tr>";
+      } else {
+        d.leaderboard.forEach((entry, i) => {
+          const tr = document.createElement("tr");
+          let avatarHtml;
+          if (entry.profile_picture_url) {
+            avatarHtml = `<img class="avatar" src="${escapeHtml(entry.profile_picture_url)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-block'"><span class="avatarPlaceholder" style="display:none">?</span>`;
+          } else {
+            avatarHtml = `<span class="avatarPlaceholder">?</span>`;
+          }
+          tr.innerHTML = `<td class="rank">${i + 1}</td><td>${avatarHtml}<span>${escapeHtml(entry.username)}</span></td><td class="rating">${entry.rating}</td>`;
+          tbody.appendChild(tr);
+        });
+      }
+      document.getElementById("leaderboardTable").style.display = "table";
+    })
+    .catch((err) => {
+      document.getElementById("leaderboardLoading").style.display = "none";
+      document.getElementById("leaderboardError").style.display = "block";
+      document.getElementById("leaderboardError").textContent = "Could not load leaderboard";
+    });
+}
+function escapeHtml(s) {
+  const div = document.createElement("div");
+  div.textContent = s;
+  return div.innerHTML;
+}
+loadLeaderboard();
 </script>
 </body>
 </html>

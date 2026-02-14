@@ -122,6 +122,22 @@ async function updateUserRating(userId, delta) {
   );
 }
 
+async function getLeaderboard(limit = 100) {
+  const result = await query(
+    `SELECT id, username, profile_picture_url, ROUND(COALESCE(rating, 800))::INTEGER AS rating
+     FROM users
+     ORDER BY COALESCE(rating, 800) DESC
+     LIMIT $1`,
+    [limit]
+  );
+  return result.rows.map((r) => ({
+    id: r.id,
+    username: r.username,
+    profile_picture_url: r.profile_picture_url || null,
+    rating: Math.round(r.rating),
+  }));
+}
+
 module.exports = {
   pool,
   query,
@@ -133,4 +149,5 @@ module.exports = {
   updateProfilePicture,
   getRatingsForUserIds,
   updateUserRating,
+  getLeaderboard,
 };
